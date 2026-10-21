@@ -2,7 +2,7 @@
 import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.2';
+const VER = 'v1.3';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -202,14 +202,23 @@ async function removeCurrentPdf() {
 }
 
 /* ======================= VIEWER ======================= */
-const viewer = $('#viewer'), stage = $('#stage'), baseC = $('#baseCanvas'), detC = $('#detailCanvas'), svg = $('#overlay');
+// v1.3 crisp rendering:
+//  - #stage holds only a low-res full-page "base" canvas. It is CSS-scaled and is just a fallback that shows while panning/zooming.
+//  - #detailCanvas sits in screen space (never CSS-scaled once settled): after zoom/pan settles, pdf.js re-renders the visible
+//    part of the page at exactly zoom × devicePixelRatio, capped for tablet limits. In between, a CSS transform keeps it aligned.
+//  - Markups are SVG in screen space; only a <g> transform changes, so the browser draws vectors at full device resolution.
+const viewer = $('#viewer'), stage = $('#stage'), baseC = $('#baseCanvas'), detC = $('#detailCanvas'), svg = $('#overlay'), world = $('#world');
 const pageKey = (d = S.docId, p = S.pageNum) => d + ':' + p;
 const curScale = () => S.project?.scales[pageKey()] || null;
 const pageMarkups = () => (S.project?.markups || []).filter(m => m.docId === S.docId && m.page === S.pageNum);
+const MAX_PIX = 16e6 * 0.98, MAX_SIDE = COARSE ? 4096 : 8192;   // stay under iOS/Android canvas limits
+const offC = document.createElement('canvas');                  // one reusable offscreen buffer (iOS leaks memory if canvases are churned)
+let detState = null;                                           // {z, tx, ty, sx, sy, w, h, k} of the last detail render
 
 function clearViewer() {
-  S.page = null; S.docId = null; stage.style.display = 'none'; $('#empty').style.display = ''; $('#pageNav').style.display = 'none';
-  svg.innerHTML = ''; updateScaleLabel(); refreshPanel();
+  S.page = null; S.docId = null; stage.style.display = 'none'; detC.style.display = 'none'; detState = null;
+  $('#empty').style.display = ''; $('#pageNav').style.display = 'none';
+  world.innerHTML = ''; updateScaleLabel(); refreshPanel();
 }
 async function showPage(docId, pageNum, fit = true) {
   const tok = ++S.token;
@@ -219,9 +228,8 @@ async function showPage(docId, pageNum, fit = true) {
   S.docId = docId; S.pageNum = pageNum; S.page = page;
   const vp = page.getViewport({ scale: 1 }); S.W = vp.width; S.H = vp.height;
   for (const el of [stage, baseC]) { el.style.width = S.W + 'px'; el.style.height = S.H + 'px'; }
-  svg.setAttribute('viewBox', `0 0 ${S.W} ${S.H}`); svg.setAttribute('width', S.W); svg.setAttribute('height', S.H);
   stage.style.display = ''; $('#empty').style.display = 'none'; $('#pageNav').style.display = '';
-  detC.style.display = 'none';
+  detC.style.display = 'none'; detState = null;
   if (S.project) { S.project.lastDoc = docId; S.project.lastPage = pageNum; touch(); }
   $('#docSelect').value = docId;
   $('#pageLabel').textContent = `Page ${pageNum} / ${pdf.numPages}`;
@@ -232,42 +240,60 @@ async function showPage(docId, pageNum, fit = true) {
 let baseTask = null;
 async function renderBase(tok) {
   const page = S.page; if (!page) return;
-  const maxSide = COARSE ? 3072 : 4096;
-  let b = Math.min(maxSide / Math.max(S.W, S.H), 3, Math.sqrt(14e6 / (S.W * S.H)));
+  const maxSide = COARSE ? 2048 : 3072;   // fallback only — kept modest so tablets stay fast
+  const b = Math.min(maxSide / Math.max(S.W, S.H), 2, Math.sqrt(6e6 / (S.W * S.H)));
   const vp = page.getViewport({ scale: b });
-  const c = document.createElement('canvas'); c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
   try { baseTask?.cancel(); } catch { }
-  baseTask = page.render({ canvasContext: c.getContext('2d'), viewport: vp });
+  baseC.width = Math.floor(vp.width); baseC.height = Math.floor(vp.height);
+  baseTask = page.render({ canvasContext: baseC.getContext('2d'), viewport: vp });
   try { await baseTask.promise; } catch (e) { if (e?.name === 'RenderingCancelledException') return; throw e; }
   if (tok !== S.token) return;
-  S.baseRes = b; baseC.width = c.width; baseC.height = c.height; baseC.getContext('2d').drawImage(c, 0, 0);
-  scheduleDetail();
+  S.baseRes = b; scheduleDetail(0);
 }
 let detT = null, detTask = null;
-function scheduleDetail() { clearTimeout(detT); detT = setTimeout(renderDetail, 180); }
+function scheduleDetail(ms = 140) { clearTimeout(detT); detT = setTimeout(renderDetail, ms); }
+// device-pixel scale actually used: zoom × DPR, reduced only if the visible region would exceed the canvas caps
+function detailScale(w, h) {
+  const dpr = window.devicePixelRatio || 1;
+  return dpr * Math.min(1, Math.sqrt(MAX_PIX / (w * h * dpr * dpr)), MAX_SIDE / (w * dpr), MAX_SIDE / (h * dpr));
+}
 async function renderDetail() {
   const page = S.page; if (!page) return;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2.5), sc = S.z * dpr;
-  if (sc <= S.baseRes * 1.05) { detC.style.display = 'none'; return; }
+  if (G && (G.type === 'pinch' || G.type === 'pan')) { scheduleDetail(); return; }   // wait until the gesture settles
   const vw = viewer.clientWidth, vh = viewer.clientHeight;
-  const x0 = Math.max(0, -S.tx / S.z), y0 = Math.max(0, -S.ty / S.z), x1 = Math.min(S.W, (vw - S.tx) / S.z), y1 = Math.min(S.H, (vh - S.ty) / S.z);
-  if (x1 <= x0 || y1 <= y0) return;
-  const pw = Math.ceil((x1 - x0) * sc), ph = Math.ceil((y1 - y0) * sc); if (pw * ph > 20e6) return;
-  const vp = page.getViewport({ scale: sc, offsetX: -x0 * sc, offsetY: -y0 * sc });
-  const c = document.createElement('canvas'); c.width = pw; c.height = ph;
+  // visible part of the page, in screen CSS px, snapped outward to whole px
+  const sx = Math.max(0, Math.floor(S.tx)), sy = Math.max(0, Math.floor(S.ty));
+  const ex = Math.min(vw, Math.ceil(S.tx + S.W * S.z)), ey = Math.min(vh, Math.ceil(S.ty + S.H * S.z));
+  if (ex <= sx || ey <= sy) { detC.style.display = 'none'; detState = null; return; }
+  const w = ex - sx, h = ey - sy, k = detailScale(w, h);
+  if (detState && detState.z === S.z && detState.tx === S.tx && detState.ty === S.ty && detState.w === w && detState.h === h && detState.k === k) { positionDetail(); return; }
+  const pw = Math.round(w * k), ph = Math.round(h * k), z = S.z, tx = S.tx, ty = S.ty, tok = S.token;
+  const vp = page.getViewport({ scale: z * k, offsetX: (tx - sx) * k, offsetY: (ty - sy) * k });
   try { detTask?.cancel(); } catch { }
-  const tok = S.token; detTask = page.render({ canvasContext: c.getContext('2d'), viewport: vp });
+  offC.width = pw; offC.height = ph;
+  detTask = page.render({ canvasContext: offC.getContext('2d', { alpha: false }), viewport: vp });
   try { await detTask.promise; } catch (e) { if (e?.name === 'RenderingCancelledException') return; throw e; }
   if (tok !== S.token) return;
-  detC.width = pw; detC.height = ph; detC.getContext('2d').drawImage(c, 0, 0);
-  Object.assign(detC.style, { left: x0 + 'px', top: y0 + 'px', width: (x1 - x0) + 'px', height: (y1 - y0) + 'px', display: 'block' });
+  if (detC.width !== pw || detC.height !== ph) { detC.width = pw; detC.height = ph; }
+  detC.getContext('2d', { alpha: false }).drawImage(offC, 0, 0);
+  offC.width = offC.height = 1;   // release the buffer's memory right away
+  detC.style.width = w + 'px'; detC.style.height = h + 'px'; detC.style.display = 'block';
+  detState = { z, tx, ty, sx, sy, w, h, k };
+  positionDetail();
+  if (S.z !== z || S.tx !== tx || S.ty !== ty) scheduleDetail();   // view moved while rendering
 }
-let ovRaf = 0;
+function positionDetail() {   // keep the last sharp render aligned with the page while the view moves (identity once settled)
+  if (!detState) return;
+  const d = detState, s = S.z / d.z, ox = S.tx - d.tx * s, oy = S.ty - d.ty * s;
+  detC.style.transform = (s === 1 && ox === 0 && oy === 0) ? `translate(${d.sx}px,${d.sy}px)` : `translate(${s * d.sx + ox}px,${s * d.sy + oy}px) scale(${s})`;
+}
+let ovT = 0;
 function applyT() {
   stage.style.transform = `translate(${S.tx}px,${S.ty}px) scale(${S.z})`;
+  world.setAttribute('transform', `translate(${S.tx} ${S.ty}) scale(${S.z})`);
   $('#zoomLabel').textContent = Math.round(S.z * 75) + '%';   // 100% = real paper size (1pt = 1/72")
-  scheduleDetail();
-  if (!ovRaf) ovRaf = requestAnimationFrame(() => { ovRaf = 0; renderOverlay(); });
+  positionDetail(); scheduleDetail();
+  if (S.z !== S.ovZ) { clearTimeout(ovT); ovT = setTimeout(renderOverlay, 90); }   // rebuild label/marker sizes once zoom settles
 }
 const fitZ = () => Math.min((viewer.clientWidth - 30) / S.W, (viewer.clientHeight - 30) / S.H);
 function fitPage() { if (!S.W) return; S.z = fitZ(); S.tx = (viewer.clientWidth - S.W * S.z) / 2; S.ty = (viewer.clientHeight - S.H * S.z) / 2; applyT(); }
@@ -315,7 +341,9 @@ const markName = m => { const p = prodById(m.productId); return (p ? p.name : ({
 
 /* ---------- overlay ---------- */
 function renderOverlay() {
-  if (!S.page || !S.project) { svg.innerHTML = ''; return; }
+  clearTimeout(ovT);
+  if (!S.page || !S.project) { world.innerHTML = ''; return; }
+  S.ovZ = S.z; world.setAttribute('transform', `translate(${S.tx} ${S.ty}) scale(${S.z})`);
   const z = S.z, fs = 12.5 / z, halo = 3.2 / z; let h = '';
   const txt = (x, y, s, col, anchor = 'middle') => `<text x="${x}" y="${y}" font-size="${fs}" fill="${col}" stroke-width="${halo}" text-anchor="${anchor}" dominant-baseline="middle">${esc(s)}</text>`;
   for (const m of pageMarkups()) {
@@ -335,11 +363,11 @@ function renderOverlay() {
     }
     if (m.id === S.selId && m.type !== 'count') { const hs = 9 / z; for (const p of m.pts) h += `<rect x="${p[0] - hs / 2}" y="${p[1] - hs / 2}" width="${hs}" height="${hs}" fill="#fff" stroke="${c}" stroke-width="${1.8 / z}"/>`; }
   }
-  svg.innerHTML = h + '<g id="pv"></g>';
+  world.innerHTML = h + '<g id="pv"></g>';
   renderPreview();
 }
 function renderPreview() {
-  const g = svg.querySelector('#pv'); if (!g) return; const d = S.drawing; if (!d) { g.innerHTML = ''; return; }
+  const g = world.querySelector('#pv'); if (!g) return; const d = S.drawing; if (!d) { g.innerHTML = ''; return; }
   const z = S.z, pts = d.pts.slice(); if (S.hover && pts.length) pts.push(constrain(S.hover, d.shift));
   const c = d.type === 'calibrate' ? '#d1495b' : (prodById(S.activeProductId)?.color || TYPE_COLOR[d.type]);
   let h = '';
@@ -966,7 +994,7 @@ async function start() {
   setTool('select'); setSave('');
 }
 start().catch(e => { console.error(e); toast('Startup error: ' + e.message, 6000); });
-window.DT = { S, applyT, fitPage, toScreen, toPage, computeEstimate, geo, fmtFtIn, qtyFor, flush, setTool, SCALES };
+window.DT = { S, applyT, fitPage, toScreen, detInfo: () => detState, hitTest, toPage, computeEstimate, geo, fmtFtIn, qtyFor, flush, setTool, SCALES };
 
 if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => { reg.update().catch(() => { }); document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => { }); }); }).catch(() => { });
