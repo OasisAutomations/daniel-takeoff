@@ -1,7 +1,8 @@
 // Daniel Takeoff — everything stays on this device (IndexedDB). No uploads, no analytics.
 import * as pdfjsLib from './vendor/pdf.min.mjs';
+import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.0';
+const VER = 'v1.1';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -75,8 +76,8 @@ const prodById = id => S.products.find(p => p.id === id) || null;
 /* ---------- UI helpers ---------- */
 function toast(msg, ms = 2200) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('on'), ms); }
 function setSave(s) { $('#saveState').textContent = s; }
-function openModal(html, mount) {
-  const back = $('#modalBack'), m = $('#modal'); m.innerHTML = html; back.classList.remove('hidden');
+function openModal(html, mount, cls = '') {
+  const back = $('#modalBack'), m = $('#modal'); m.className = cls; m.innerHTML = html; back.classList.remove('hidden');
   const close = () => { back.classList.add('hidden'); m.innerHTML = ''; };
   m.querySelectorAll('[data-close]').forEach(b => b.onclick = close);
   if (mount) mount(m, close);
@@ -647,7 +648,7 @@ function computeEstimate() {
     const w = num(r.prod.waste), qw = r.qty * (1 + w / 100), price = num(r.prod.price), lab = num(r.prod.labor);
     return { kind: 'product', id: r.prod.id, name: r.prod.name, category: r.prod.category || '', unit: r.prod.unit, qty: r.qty, waste: w, qtyW: qw, price, mat: qw * price, laborU: lab, labor: qw * lab, total: qw * (price + lab), n: r.n };
   });
-  const manual = P.manual.map(x => { const q = num(x.qty), pr = num(x.price), lb = num(x.labor); return { kind: 'manual', id: x.id, name: x.desc || '', category: 'Manual', unit: x.unit || 'EA', qty: q, waste: 0, qtyW: q, price: pr, mat: q * pr, laborU: lb, labor: q * lb, total: q * (pr + lb) }; });
+  const manual = P.manual.map(x => { const q = num(x.qty), pr = num(x.price), lb = num(x.labor), w = num(x.waste), qw = q * (1 + w / 100); return { kind: 'manual', id: x.id, name: x.desc || '', category: 'Manual', unit: x.unit || 'EA', qty: q, waste: w, qtyW: qw, price: pr, mat: qw * pr, laborU: lb, labor: qw * lb, total: qw * (pr + lb), productId: x.productId || null }; });
   const all = [...lines, ...manual];
   const mat = all.reduce((s, l) => s + l.mat, 0), labor = all.reduce((s, l) => s + l.labor, 0);
   const taxPct = num(P.settings.taxPct), markupPct = num(P.settings.markupPct);
@@ -667,7 +668,7 @@ function renderEstimate() {
   if (E.manual.length) h += `<tr class="cat"><td colspan="11">Manual items</td></tr>`;
   for (const l of E.manual) {
     const x = S.project.manual.find(m => m.id === l.id);
-    h += `<tr data-mid="${l.id}"><td><input data-f="desc" value="${esc(x.desc)}" placeholder="Description"></td><td><input data-f="unit" value="${esc(x.unit || 'EA')}" style="width:60px"></td><td class="n"></td><td class="n"></td><td class="n"><input class="num" data-f="qty" inputmode="decimal" value="${esc(x.qty)}"></td><td class="n"><input class="num" data-f="price" inputmode="decimal" value="${esc(x.price)}"></td><td class="n">${fmt$(l.mat)}</td><td class="n"><input class="num" data-f="labor" inputmode="decimal" value="${esc(x.labor)}"></td><td class="n">${fmt$(l.labor)}</td><td class="n"><b>${fmt$(l.total)}</b></td><td><button class="small danger" data-del="${l.id}">✕</button></td></tr>`;
+    h += `<tr data-mid="${l.id}"><td><input data-f="desc" value="${esc(x.desc)}" placeholder="Description"></td><td><input data-f="unit" value="${esc(x.unit || 'EA')}" style="width:60px"></td><td class="n"><input class="num" data-f="qty" inputmode="decimal" value="${esc(x.qty)}"></td><td class="n"><input class="num pct" data-f="waste" inputmode="decimal" value="${esc(x.waste || 0)}" title="Waste %"></td><td class="n"><b>${fmtQty(l.qtyW, l.unit)}</b></td><td class="n"><input class="num" data-f="price" inputmode="decimal" value="${esc(x.price)}"></td><td class="n">${fmt$(l.mat)}</td><td class="n"><input class="num" data-f="labor" inputmode="decimal" value="${esc(x.labor)}"></td><td class="n">${fmt$(l.labor)}</td><td class="n"><b>${fmt$(l.total)}</b></td><td><button class="small danger" data-del="${l.id}">✕</button></td></tr>`;
   }
   if (E.un.n) h += `<tr class="sub"><td colspan="11">Unassigned markups (${E.un.n}), not priced: ${[E.un.LF && fmtN(E.un.LF) + ' LF', E.un.SF && fmtN(E.un.SF) + ' SF', E.un.EA && E.un.EA + ' EA'].filter(Boolean).join(' · ')}. Assign a product to include them.</td></tr>`;
   if (E.noScale) h += `<tr class="sub"><td colspan="11">${E.noScale} markups are on pages without a scale and are not included.</td></tr>`;
@@ -946,3 +947,102 @@ if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) {
   let reloaded = false; const hadCtrl = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange', () => { if (!hadCtrl || reloaded || S.drawing) return; reloaded = true; flush().then(() => location.reload()); });
 }
+
+/* ======================= VOICE ESTIMATOR (v1.1) ======================= */
+// Parsing + matching run locally (voice.js). Speech-to-text is the browser's own Web Speech service.
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+let vRec = null, vRows = [];
+function voiceModal() {
+  if (!S.project) return toast('Open or create a project first');
+  if (!S.products.length) toast('Tip: add products first so items can be matched and priced', 3500);
+  const ex = '40 feet of base, two 30-inch uppers, 120 square feet of shelving';
+  openModal(`<h3>Voice estimate</h3>
+    <p class="muted small">Say or type items naturally, e.g. <i>"${ex}"</i>. Separate items with commas, "and", or a pause.</p>
+    <div class="vMicRow"><button id="vMic" class="accent big" ${SpeechRec ? '' : 'disabled'}>🎤 Start talking</button><span id="vStatus" class="small muted">${SpeechRec ? 'Tap the mic, speak, then tap again to stop.' : "Speech isn't available in this browser. Type below instead."}</span></div>
+    <textarea id="vText" placeholder="Or type here, e.g. ${ex}"></textarea>
+    <div class="actions" style="margin-top:6px"><button id="vParse">Read items</button><button id="vClear">Clear</button></div>
+    <div id="vRows"></div>
+    <div class="btns"><button data-close>Cancel</button><button id="vAdd" class="accent" disabled>Add to estimate</button></div>
+    <p class="muted small">Reading and matching happen on this device. ${SpeechRec ? 'Voice-to-text is done by the browser: on-device when it supports it, otherwise the browser maker\'s speech service. Typing never leaves the device.' : ''}</p>`, (m, close) => {
+    vRows = [];
+    const txt = m.querySelector('#vText');
+    m.querySelector('#vParse').onclick = () => voiceParse(txt.value);
+    m.querySelector('#vClear').onclick = () => { txt.value = ''; vRows = []; renderVoiceRows(); };
+    txt.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); voiceParse(txt.value); } });
+    m.querySelector('#vMic').onclick = () => vRec ? stopVoice() : startVoice(txt);
+    m.querySelector('#vAdd').onclick = () => { const n = voiceCommit(); if (n) { stopVoice(); close(); renderEstimate(); toast(`Added ${n} line${n > 1 ? 's' : ''} to the estimate`); } };
+    m.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', stopVoice));
+    txt.focus();
+  }, 'wide');
+}
+async function startVoice(txt) {
+  const st = $('#vStatus'), btn = $('#vMic'); if (!SpeechRec || !btn) return;
+  const rec = new SpeechRec(), lang = navigator.language || 'en-US';
+  rec.lang = lang; rec.continuous = true; rec.interimResults = true;
+  let mode = 'browser speech service';
+  try {
+    if ('processLocally' in rec && SpeechRec.available) {
+      let a = await SpeechRec.available({ langs: [lang], processLocally: true });
+      if (a === 'downloadable' || a === 'downloading') { st.textContent = 'Getting on-device speech ready…'; if (await SpeechRec.install({ langs: [lang], processLocally: true }).catch(() => false)) a = 'available'; }
+      if (a === 'available') { rec.processLocally = true; mode = 'on-device'; }
+    }
+  } catch { }
+  const base = txt.value.trim() ? txt.value.trim() + ', ' : '';
+  let finals = '';
+  rec.onresult = e => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) { const r = e.results[i]; if (r.isFinal) finals += (finals ? ', ' : '') + r[0].transcript.trim(); else interim += r[0].transcript; }
+    txt.value = base + finals + (interim ? (finals ? ', ' : '') + interim : '');
+  };
+  rec.onerror = e => {
+    const msg = { 'not-allowed': 'Microphone blocked. Allow the mic for this site in browser settings.', 'service-not-allowed': 'Speech service blocked in this browser. Type instead.', 'no-speech': 'Didn\'t hear anything. Try again.', network: 'Speech service unreachable (offline?). Type instead.', 'language-not-supported': 'Speech language not supported here. Type instead.', 'audio-capture': 'No microphone found.' }[e.error] || ('Speech error: ' + e.error);
+    if ($('#vStatus')) $('#vStatus').textContent = msg;
+  };
+  rec.onend = () => { vRec = null; const b = $('#vMic'); if (b) { b.classList.remove('live'); b.textContent = '🎤 Start talking'; } if (finals && $('#vText')) voiceParse($('#vText').value); };
+  try { rec.start(); } catch (e) { st.textContent = 'Could not start the mic: ' + e.message; return; }
+  vRec = rec; btn.classList.add('live'); btn.textContent = '■ Stop'; st.textContent = `Listening (${mode})… tap Stop when done.`;
+}
+function stopVoice() { try { vRec?.stop(); } catch { } }
+function voiceParse(text) {
+  vRows = voicePropose(text || '', S.products).map(r => ({ ...r, include: !!r.productId && r.qty != null }));
+  renderVoiceRows();
+  if (!vRows.length) toast("Couldn't find any items in that");
+}
+function voiceDesc(r, p) { const ds = r.dims.filter(x => !p || !p.name.includes(x.replace(/(in|ft)$/, ''))), d = ds.length ? ' (' + ds.join(', ') + ')' : ''; return p ? p.name + d : (r.words.join(' ') || r.heard) + d; }
+function renderVoiceRows() {
+  const box = $('#vRows'), add = $('#vAdd'); if (!box) return;
+  if (!vRows.length) { box.innerHTML = ''; add.disabled = true; add.textContent = 'Add to estimate'; return; }
+  box.innerHTML = `<div class="tableWrap"><table class="grid"><tr><th>Add</th><th>Heard</th><th>Product</th><th class="n">Qty</th><th>Unit</th><th>Status</th></tr>
+    ${vRows.map((r, i) => {
+      const p = prodById(r.productId);
+      const status = !r.productId ? `<span class="vBad">⚠ ${r.warn || 'No matching product'}</span>` : r.qty == null ? '<span class="vBad">⚠ No quantity heard</span>' : r.warn ? `<span class="vWarn">⚠ ${esc(r.warn)}</span>` : `<span class="vOk">✓ ${p ? fmt$(num(p.price)) + '/' + esc(p.unit) : ''}</span>`;
+      return `<tr data-i="${i}" class="${r.include ? '' : 'off'}"><td><input type="checkbox" data-f="include" ${r.include ? 'checked' : ''}></td><td class="small">${esc(r.heard)}</td>
+        <td><select data-f="product">${productOptions(r.productId, '— No match: pick a product —')}</select></td>
+        <td class="n"><input class="num" data-f="qty" inputmode="decimal" value="${r.qty == null ? '' : r.qty}"></td>
+        <td><input data-f="unit" value="${esc(r.unit || '')}" style="width:62px"></td><td class="small">${status}</td></tr>`;
+    }).join('')}</table></div>`;
+  box.querySelectorAll('tr[data-i]').forEach(tr => {
+    const r = vRows[+tr.dataset.i];
+    tr.querySelector('[data-f=include]').onchange = e => { r.include = e.target.checked; renderVoiceRows(); };
+    tr.querySelector('[data-f=product]').onchange = e => {
+      r.productId = e.target.value; const p = prodById(r.productId);
+      const res = voiceResolve({ ...r, qty: r.parsedQty, unit: r.parsedUnit }, p); r.qty = res.qty; r.unit = res.unit; r.warn = p ? res.warn : 'No matching product';
+      r.include = !!p && r.qty != null; renderVoiceRows();
+    };
+    tr.querySelector('[data-f=qty]').onchange = e => { const v = e.target.value.trim(); r.qty = v === '' ? null : num(v, null); if (r.qty != null && r.productId) r.include = true; renderVoiceRows(); };
+    tr.querySelector('[data-f=unit]').onchange = e => { r.unit = e.target.value.trim().toUpperCase(); const p = prodById(r.productId); r.warn = p && r.unit !== String(p.unit).toUpperCase() ? `Unit differs from product (${p.unit})` : ''; renderVoiceRows(); };
+  });
+  const n = vRows.filter(r => r.include && r.qty != null).length;
+  add.disabled = !n; add.textContent = n ? `Add ${n} line${n > 1 ? 's' : ''} to estimate` : 'Add to estimate';
+}
+function voiceCommit() {
+  let n = 0;
+  for (const r of vRows) {
+    if (!r.include || r.qty == null) continue; const p = prodById(r.productId);
+    S.project.manual.push({ id: uid(), desc: voiceDesc(r, p), productId: p?.id || null, qty: r.qty, unit: r.unit || p?.unit || 'EA', price: p ? num(p.price) : 0, labor: p ? num(p.labor) : 0, waste: p ? num(p.waste) : 0, source: 'voice', heard: r.heard });
+    n++;
+  }
+  if (n) touch();
+  return n;
+}
+$('#btnVoice').onclick = voiceModal;

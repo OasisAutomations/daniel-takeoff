@@ -1,7 +1,7 @@
 // Daniel Takeoff service worker: installable + works offline. Nothing is sent anywhere.
 // Bump CACHE when you publish a new version so devices pick it up.
-const CACHE = 'daniel-takeoff-v1.0';
-const SHELL = ['./', './index.html', './app.css', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png',
+const CACHE = 'daniel-takeoff-v1.1';
+const SHELL = ['./', './index.html', './app.css', './app.js', './voice.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png',
   './vendor/pdf.min.mjs', './vendor/pdf.worker.min.mjs', './vendor/xlsx.mini.min.js'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
