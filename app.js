@@ -2,7 +2,7 @@
 import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.1';
+const VER = 'v1.2';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -46,7 +46,10 @@ function fmtFtIn(ft) {
 }
 const fmtN = (n, d = 2) => (n == null || !isFinite(n)) ? '—' : n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 const fmt$ = n => (n < 0 ? '-$' : '$') + fmtN(Math.abs(n), 2);
-const fmtQty = (q, unit) => q == null ? '—' : (String(unit).toUpperCase() === 'EA' && Math.abs(q - Math.round(q)) < 1e-9 ? fmtN(q, 0) : fmtN(q, 2));
+// v1.2: length/area units keep 2 decimals; count-type units (EA, PAIR, SET, SHT…) show plain whole numbers (fractions only if real, e.g. 6.3)
+const MEASURE_UNITS = new Set(['LF', 'SF', 'SY', 'SQ', 'CY', 'FT', 'LIN', 'M', 'M2']);
+const isMeasureUnit = u => MEASURE_UNITS.has(String(u || '').toUpperCase());
+const fmtQty = (q, unit) => (q == null || !isFinite(q)) ? '—' : isMeasureUnit(unit) ? fmtN(q, 2) : (Math.abs(q - Math.round(q)) < 1e-9 ? fmtN(Math.round(q), 0) : q.toLocaleString('en-US', { maximumFractionDigits: 2 }));
 function parseInches(s) {   // "6", "6.5", "6 1/2", "1/2"
   s = String(s ?? '').trim().replace(/["”]|in(ch(es)?)?$/i, '').trim(); if (!s) return 0;
   let m = s.match(/^(\d+(?:\.\d+)?)?\s*(?:(\d+)\s*\/\s*(\d+))?$/); if (!m) return NaN;
@@ -653,42 +656,64 @@ function computeEstimate() {
   const mat = all.reduce((s, l) => s + l.mat, 0), labor = all.reduce((s, l) => s + l.labor, 0);
   const taxPct = num(P.settings.taxPct), markupPct = num(P.settings.markupPct);
   const tax = mat * taxPct / 100, markup = (mat + labor) * markupPct / 100, grand = mat + labor + tax + markup;
-  return { lines, manual, all, un, noScale, mat, labor, tax, taxPct, markup, markupPct, grand };
+  const anyPriced = all.some(l => l.price > 0 || l.laborU > 0), sp = P.settings.showPrices;
+  const show = typeof sp === 'boolean' ? sp : anyPriced;   // auto: off until something has a price; Daniel's flip overrides
+  return { lines, manual, all, un, noScale, mat, labor, tax, taxPct, markup, markupPct, grand, anyPriced, show, showAuto: typeof sp !== 'boolean' };
 }
+const m$ = v => v ? fmt$(v) : '';   // unpriced cells stay blank instead of $0.00
 function renderEstimate() {
-  const E = computeEstimate(), t = $('#estTable');
+  const E = computeEstimate(), t = $('#estTable'), tog = $('#togPrices');
   $('#estProj').textContent = S.project ? '· ' + S.project.name : '';
-  if (!E) { t.innerHTML = '<tr><td class="muted">Open or create a project first.</td></tr>'; $('#estTotals').innerHTML = ''; return; }
-  let h = `<tr><th>Item</th><th>Unit</th><th class="n">Measured</th><th class="n">Waste</th><th class="n">Qty</th><th class="n">Unit price</th><th class="n">Material</th><th class="n">Labor/unit</th><th class="n">Labor</th><th class="n">Line total</th><th></th></tr>`;
+  if (!E) { t.innerHTML = '<tr><td class="muted">Open or create a project first.</td></tr>'; $('#estTotals').innerHTML = ''; tog.disabled = true; return; }
+  const P = E.show, C = P ? 11 : 6;
+  tog.disabled = false; tog.checked = P;
+  $('#togPricesHint').textContent = E.showAuto ? '(auto)' : '';
+  let h = `<tr><th>Item</th><th>Unit</th><th class="n">Measured</th><th class="n">Waste</th><th class="n">Qty</th>${P ? '<th class="n">Unit price</th><th class="n">Material</th><th class="n">Labor/unit</th><th class="n">Labor</th><th class="n">Line total</th>' : ''}<th></th></tr>`;
   let cat = null;
   for (const l of E.lines) {
-    if (l.category !== cat) { cat = l.category; h += `<tr class="cat"><td colspan="11">${esc(cat || 'Uncategorized')}</td></tr>`; }
-    h += `<tr><td><span class="sw" style="display:inline-block;background:${prodById(l.id)?.color};margin-right:6px"></span>${esc(l.name)} <span class="muted small">(${l.n})</span></td><td>${esc(l.unit)}</td><td class="n">${fmtQty(l.qty, l.unit)}</td><td class="n">${fmtN(l.waste, l.waste % 1 ? 1 : 0)}%</td><td class="n"><b>${fmtQty(l.qtyW, l.unit)}</b></td><td class="n">${fmt$(l.price)}</td><td class="n">${fmt$(l.mat)}</td><td class="n">${fmt$(l.laborU)}</td><td class="n">${fmt$(l.labor)}</td><td class="n"><b>${fmt$(l.total)}</b></td><td></td></tr>`;
+    if (l.category !== cat) { cat = l.category; h += `<tr class="cat"><td colspan="${C}">${esc(cat || 'Uncategorized')}</td></tr>`; }
+    h += `<tr><td><span class="sw" style="display:inline-block;background:${prodById(l.id)?.color};margin-right:6px"></span>${esc(l.name)} <span class="muted small">(${l.n})</span></td><td>${esc(l.unit)}</td><td class="n">${fmtQty(l.qty, l.unit)}</td><td class="n">${fmtN(l.waste, l.waste % 1 ? 1 : 0)}%</td><td class="n"><b>${fmtQty(l.qtyW, l.unit)}</b></td>${P ? `<td class="n">${m$(l.price)}</td><td class="n">${m$(l.mat)}</td><td class="n">${m$(l.laborU)}</td><td class="n">${m$(l.labor)}</td><td class="n"><b>${m$(l.total)}</b></td>` : ''}<td></td></tr>`;
   }
-  if (E.manual.length) h += `<tr class="cat"><td colspan="11">Manual items</td></tr>`;
+  if (E.manual.length) h += `<tr class="cat"><td colspan="${C}">Manual items</td></tr>`;
   for (const l of E.manual) {
     const x = S.project.manual.find(m => m.id === l.id);
-    h += `<tr data-mid="${l.id}"><td><input data-f="desc" value="${esc(x.desc)}" placeholder="Description"></td><td><input data-f="unit" value="${esc(x.unit || 'EA')}" style="width:60px"></td><td class="n"><input class="num" data-f="qty" inputmode="decimal" value="${esc(x.qty)}"></td><td class="n"><input class="num pct" data-f="waste" inputmode="decimal" value="${esc(x.waste || 0)}" title="Waste %"></td><td class="n"><b>${fmtQty(l.qtyW, l.unit)}</b></td><td class="n"><input class="num" data-f="price" inputmode="decimal" value="${esc(x.price)}"></td><td class="n">${fmt$(l.mat)}</td><td class="n"><input class="num" data-f="labor" inputmode="decimal" value="${esc(x.labor)}"></td><td class="n">${fmt$(l.labor)}</td><td class="n"><b>${fmt$(l.total)}</b></td><td><button class="small danger" data-del="${l.id}">✕</button></td></tr>`;
+    h += `<tr data-mid="${l.id}"><td><input data-f="desc" value="${esc(x.desc)}" placeholder="Description"></td><td><input data-f="unit" value="${esc(x.unit || 'EA')}" style="width:60px"></td><td class="n"><input class="num" data-f="qty" inputmode="decimal" value="${esc(x.qty)}"></td><td class="n"><input class="num pct" data-f="waste" inputmode="decimal" value="${esc(x.waste || 0)}" title="Waste %"></td><td class="n"><b>${fmtQty(l.qtyW, l.unit)}</b></td>${P ? `<td class="n"><input class="num" data-f="price" inputmode="decimal" placeholder="$" value="${num(x.price) ? esc(x.price) : ''}"></td><td class="n">${m$(l.mat)}</td><td class="n"><input class="num" data-f="labor" inputmode="decimal" placeholder="$" value="${num(x.labor) ? esc(x.labor) : ''}"></td><td class="n">${m$(l.labor)}</td><td class="n"><b>${m$(l.total)}</b></td>` : ''}<td><button class="small danger" data-del="${l.id}">✕</button></td></tr>`;
   }
-  if (E.un.n) h += `<tr class="sub"><td colspan="11">Unassigned markups (${E.un.n}), not priced: ${[E.un.LF && fmtN(E.un.LF) + ' LF', E.un.SF && fmtN(E.un.SF) + ' SF', E.un.EA && E.un.EA + ' EA'].filter(Boolean).join(' · ')}. Assign a product to include them.</td></tr>`;
-  if (E.noScale) h += `<tr class="sub"><td colspan="11">${E.noScale} markups are on pages without a scale and are not included.</td></tr>`;
-  if (!E.all.length) h += `<tr><td colspan="11" class="muted">No priced items yet. Measure on the plan with a product selected, or add a manual line.</td></tr>`;
+  if (E.un.n) h += `<tr class="sub"><td colspan="${C}">Unassigned markups (${E.un.n}), not included: ${[E.un.LF && fmtN(E.un.LF) + ' LF', E.un.SF && fmtN(E.un.SF) + ' SF', E.un.EA && E.un.EA + ' EA'].filter(Boolean).join(' · ')}. Assign a product to include them.</td></tr>`;
+  if (E.noScale) h += `<tr class="sub"><td colspan="${C}">${E.noScale} markups are on pages without a scale and are not included.</td></tr>`;
+  if (!E.all.length) h += `<tr><td colspan="${C}" class="muted">No items yet. Measure on the plan with a product selected, or add a manual line.</td></tr>`;
   t.innerHTML = h;
   t.querySelectorAll('tr[data-mid] input').forEach(inp => inp.onchange = () => { const x = S.project.manual.find(m => m.id === inp.closest('tr').dataset.mid); x[inp.dataset.f] = inp.dataset.f === 'desc' || inp.dataset.f === 'unit' ? inp.value : num(inp.value); touch(); renderEstimate(); });
   t.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { S.project.manual = S.project.manual.filter(m => m.id !== b.dataset.del); touch(); renderEstimate(); });
-  $('#estTotals').innerHTML = `<div class="trow"><span>Material</span><span>${fmt$(E.mat)}</span></div>
+  const tot = $('#estTotals');
+  tot.classList.toggle('hidden', !P);
+  tot.innerHTML = !P ? '' : `<div class="trow"><span>Material</span><span>${fmt$(E.mat)}</span></div>
     <div class="trow"><span>Labor</span><span>${fmt$(E.labor)}</span></div>
     <div class="trow"><span>Markup / overhead <input id="eMk" inputmode="decimal" value="${E.markupPct}">%</span><span>${fmt$(E.markup)}</span></div>
     <div class="trow"><span>Tax on material <input id="eTx" inputmode="decimal" value="${E.taxPct}">%</span><span>${fmt$(E.tax)}</span></div>
     <div class="trow grand"><span>Grand total</span><span id="eGrand">${fmt$(E.grand)}</span></div>`;
-  $('#eMk').onchange = e => { S.project.settings.markupPct = num(e.target.value); touch(); renderEstimate(); };
-  $('#eTx').onchange = e => { S.project.settings.taxPct = num(e.target.value); touch(); renderEstimate(); };
-  $('#estNote').textContent = 'Qty = measured × (1 + waste %). Material = qty × unit price. Labor = qty × labor per unit. Markup % applies to material + labor; tax % applies to material only.';
+  if (P) {
+    $('#eMk').onchange = e => { S.project.settings.markupPct = num(e.target.value); touch(); renderEstimate(); };
+    $('#eTx').onchange = e => { S.project.settings.taxPct = num(e.target.value); touch(); renderEstimate(); };
+  }
+  $('#estNote').textContent = P ? 'Qty = measured × (1 + waste %). Material = qty × unit price. Labor = qty × labor per unit. Markup % applies to material + labor; tax % applies to material only. Blank price cells = not priced.'
+    : 'Prices are hidden (quantities only), on screen and in print and exports. Turn on "Show prices" to price this estimate.';
+}
+function setShowPrices(v) {
+  const E = computeEstimate(); if (!E) return;
+  S.project.settings.showPrices = v === E.anyPriced ? null : v;   // matching the automatic choice goes back to auto
+  S.project.updated = Date.now(); flush(); renderEstimate();   // save right away
 }
 const r2 = n => Math.round(n * 100) / 100, r4 = n => Math.round(n * 10000) / 10000;
+const b2 = n => n ? r2(n) : '';   // blank instead of 0 for unpriced cells
 function estimateAOA(E) {
+  if (!E.show) {
+    const rows = [['Item', 'Category', 'Unit', 'Measured qty', 'Waste %', 'Qty with waste']];
+    for (const l of E.all) rows.push([l.name, l.category, l.unit, r4(l.qty), l.waste, r4(l.qtyW)]);
+    return rows;
+  }
   const rows = [['Item', 'Category', 'Unit', 'Measured qty', 'Waste %', 'Qty with waste', 'Unit price', 'Material', 'Labor per unit', 'Labor', 'Line total']];
-  for (const l of E.all) rows.push([l.name, l.category, l.unit, r4(l.qty), l.waste, r4(l.qtyW), r2(l.price), r2(l.mat), r2(l.laborU), r2(l.labor), r2(l.total)]);
+  for (const l of E.all) rows.push([l.name, l.category, l.unit, r4(l.qty), l.waste, r4(l.qtyW), b2(l.price), b2(l.mat), b2(l.laborU), b2(l.labor), b2(l.total)]);
   rows.push([], ['', '', '', '', '', '', '', 'Material', r2(E.mat)], ['', '', '', '', '', '', '', 'Labor', r2(E.labor)],
     ['', '', '', '', '', '', '', `Markup ${E.markupPct}%`, r2(E.markup)], ['', '', '', '', '', '', '', `Tax on material ${E.taxPct}%`, r2(E.tax)], ['', '', '', '', '', '', '', 'Grand total', r2(E.grand)]);
   return rows;
@@ -721,11 +746,11 @@ async function exportXlsx() {
   X.writeFile(wb, `${safeName(S.project.name)}_estimate.xlsx`); toast('Excel file exported');
 }
 function printSummary() {
-  const E = computeEstimate(); if (!E) return;
-  $('#printArea').innerHTML = `<h1>${esc(S.project.name)} — Estimate</h1><div>${new Date().toLocaleDateString()}</div><br>
-    <table><tr><th>Item</th><th>Unit</th><th class="n">Qty (w/ waste)</th><th class="n">Unit price</th><th class="n">Material</th><th class="n">Labor</th><th class="n">Total</th></tr>
-    ${E.all.map(l => `<tr><td>${esc(l.name)}</td><td>${esc(l.unit)}</td><td class="n">${fmtQty(l.qtyW, l.unit)}</td><td class="n">${fmt$(l.price)}</td><td class="n">${fmt$(l.mat)}</td><td class="n">${fmt$(l.labor)}</td><td class="n">${fmt$(l.total)}</td></tr>`).join('')}</table>
-    <div class="tot"><div><span>Material</span><span>${fmt$(E.mat)}</span></div><div><span>Labor</span><span>${fmt$(E.labor)}</span></div><div><span>Markup ${E.markupPct}%</span><span>${fmt$(E.markup)}</span></div><div><span>Tax ${E.taxPct}%</span><span>${fmt$(E.tax)}</span></div><div class="g"><span>Grand total</span><span>${fmt$(E.grand)}</span></div></div>
+  const E = computeEstimate(); if (!E) return; const P = E.show;
+  $('#printArea').innerHTML = `<h1>${esc(S.project.name)} — ${P ? 'Estimate' : 'Quantities'}</h1><div>${new Date().toLocaleDateString()}</div><br>
+    <table><tr><th>Item</th><th>Unit</th><th class="n">Qty (w/ waste)</th>${P ? '<th class="n">Unit price</th><th class="n">Material</th><th class="n">Labor</th><th class="n">Total</th>' : ''}</tr>
+    ${E.all.map(l => `<tr><td>${esc(l.name)}</td><td>${esc(l.unit)}</td><td class="n">${fmtQty(l.qtyW, l.unit)}</td>${P ? `<td class="n">${m$(l.price)}</td><td class="n">${m$(l.mat)}</td><td class="n">${m$(l.labor)}</td><td class="n">${m$(l.total)}</td>` : ''}</tr>`).join('')}</table>
+    ${P ? `<div class="tot"><div><span>Material</span><span>${fmt$(E.mat)}</span></div><div><span>Labor</span><span>${fmt$(E.labor)}</span></div><div><span>Markup ${E.markupPct}%</span><span>${fmt$(E.markup)}</span></div><div><span>Tax ${E.taxPct}%</span><span>${fmt$(E.tax)}</span></div><div class="g"><span>Grand total</span><span>${fmt$(E.grand)}</span></div></div>` : ''}
     ${S.project.checklist.length ? `<h3>Checklist</h3><table>${S.project.checklist.map(c => `<tr><td>${c.done ? '☑' : '☐'} ${esc(c.text)}${c.notes ? `<br><small>${esc(c.notes)}</small>` : ''}</td></tr>`).join('')}</table>` : ''}`;
   window.print();
 }
@@ -911,6 +936,7 @@ $('#zoomFit').onclick = fitPage;
 $('#togglePanel').onclick = () => { $('#panel').classList.toggle('closed'); setTimeout(() => S.page && scheduleDetail(), 50); };
 $('#prevPage').onclick = () => gotoPage(-1); $('#nextPage').onclick = () => gotoPage(1);
 $('#btnAddManual').onclick = () => { if (!S.project) return; S.project.manual.push({ id: uid(), desc: '', unit: 'EA', qty: 1, price: 0, labor: 0 }); touch(); renderEstimate(); const ins = $$('#estTable tr[data-mid] input[data-f=desc]'); ins[ins.length - 1]?.focus(); };
+$('#togPrices').onchange = e => setShowPrices(e.target.checked);
 $('#btnExportCsv').onclick = exportEstimateCsv; $('#btnExportXlsx').onclick = () => exportXlsx().catch(e => { console.warn(e); toast('Excel export failed — use CSV'); }); $('#btnPrint').onclick = printSummary;
 $('#btnAddProduct').onclick = () => productModal(null); $('#prodSearch').oninput = renderProducts;
 $('#btnImportCsv').onclick = () => $('#fileCsv').click(); $('#btnExportProducts').onclick = exportProductsCsv;
@@ -1015,7 +1041,7 @@ function renderVoiceRows() {
   box.innerHTML = `<div class="tableWrap"><table class="grid"><tr><th>Add</th><th>Heard</th><th>Product</th><th class="n">Qty</th><th>Unit</th><th>Status</th></tr>
     ${vRows.map((r, i) => {
       const p = prodById(r.productId);
-      const status = !r.productId ? `<span class="vBad">⚠ ${r.warn || 'No matching product'}</span>` : r.qty == null ? '<span class="vBad">⚠ No quantity heard</span>' : r.warn ? `<span class="vWarn">⚠ ${esc(r.warn)}</span>` : `<span class="vOk">✓ ${p ? fmt$(num(p.price)) + '/' + esc(p.unit) : ''}</span>`;
+      const status = !r.productId ? `<span class="vBad">⚠ ${r.warn || 'No matching product'}</span>` : r.qty == null ? '<span class="vBad">⚠ No quantity heard</span>' : r.warn ? `<span class="vWarn">⚠ ${esc(r.warn)}</span>` : `<span class="vOk">✓ ${p && computeEstimate()?.show && num(p.price) ? fmt$(num(p.price)) + '/' + esc(p.unit) : 'Matched'}</span>`;
       return `<tr data-i="${i}" class="${r.include ? '' : 'off'}"><td><input type="checkbox" data-f="include" ${r.include ? 'checked' : ''}></td><td class="small">${esc(r.heard)}</td>
         <td><select data-f="product">${productOptions(r.productId, '— No match: pick a product —')}</select></td>
         <td class="n"><input class="num" data-f="qty" inputmode="decimal" value="${r.qty == null ? '' : r.qty}"></td>

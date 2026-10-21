@@ -156,3 +156,7 @@ table.grid input.num.pct{width:60px}
 #vRows table.grid input.num{width:80px}
 #vRows tr.off td{opacity:.55}
 .vOk{color:#5fc4b6}.vWarn{color:#e8c98b}.vBad{color:#f0a39c}
+
+/* v1.2 show-prices toggle */
+.toggle{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--line2);border-radius:7px;background:var(--bg2);cursor:pointer;min-height:34px;user-select:none}
+.toggle input{width:18px;height:18px;min-height:0;accent-color:var(--accent);margin:0}
