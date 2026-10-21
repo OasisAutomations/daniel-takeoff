@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Daniel Takeoff</title>
+<meta name="theme-color" content="#1c2126">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="top">
+  <div class="brand"><span class="logo">◢</span> Daniel Takeoff <span id="ver" class="ver"></span></div>
+  <button id="btnProjects" class="projbtn" title="Projects"><span id="projName">No project</span> ▾</button>
+  <nav id="tabs">
+    <button data-view="plans" class="on">Plans</button>
+    <button data-view="estimate">Estimate</button>
+    <button data-view="products">Products</button>
+    <button data-view="checklist">Checklist</button>
+  </nav>
+  <span id="saveState" class="muted small"></span>
+</header>
+
+<main>
+  <!-- PLANS -->
+  <section id="view-plans" class="view on">
+    <div id="toolbar">
+      <div class="grp">
+        <button class="tool on" data-tool="select" title="Select / pan (V)"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M5 3l10 6-4.5 1.2L9 15z"/></svg> <span>Select</span></button>
+        <button class="tool" data-tool="length" title="Length (L)"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3 15L9 6l8 4"/><circle cx="3" cy="15" r="1.4" fill="currentColor"/><circle cx="9" cy="6" r="1.4" fill="currentColor"/><circle cx="17" cy="10" r="1.4" fill="currentColor"/></svg> <span>Length</span></button>
+        <button class="tool" data-tool="area" title="Area (A)"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 5h12v10H8L4 11z" fill="currentColor" fill-opacity=".25"/></svg> <span>Area</span></button>
+        <button class="tool" data-tool="count" title="Count (C)"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><circle cx="6" cy="7" r="2.2" fill="currentColor"/><circle cx="14" cy="7" r="2.2" fill="currentColor"/><circle cx="10" cy="14" r="2.2" fill="currentColor"/></svg> <span>Count</span></button>
+      </div>
+      <div class="grp">
+        <select id="activeProduct" title="Product for new markups"></select>
+      </div>
+      <div class="grp">
+        <button id="btnFinish" class="accent" disabled title="Finish (Enter / double-click)">✓ Finish</button>
+        <button id="btnUndo" title="Undo (Ctrl+Z)">↶</button>
+        <button id="btnRedo" title="Redo (Ctrl+Y)">↷</button>
+      </div>
+      <div class="grp">
+        <button id="btnScale" class="scalebtn" title="Set scale for this page"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M2 13l11-11 5 5-11 11z"/><path d="M6 9l1.5 1.5M8.5 6.5l1.5 1.5M11 4l1.5 1.5"/></svg> <span id="scaleLabel">No scale</span></button>
+      </div>
+      <div class="grp right">
+        <button id="zoomOut" title="Zoom out">−</button>
+        <button id="zoomFit" title="Fit page"><span id="zoomLabel">100%</span></button>
+        <button id="zoomIn" title="Zoom in">+</button>
+        <button id="togglePanel" title="Show/hide markups panel">☰</button>
+      </div>
+    </div>
+    <div id="plansBody">
+      <aside id="sidebar">
+        <div class="sideHead">
+          <select id="docSelect" title="PDF in this project"></select>
+          <button id="btnAddPdf" class="accent small" title="Add PDF">+ PDF</button>
+        </div>
+        <div id="thumbs"></div>
+        <div id="docTools" class="small">
+          <button id="btnRemovePdf" class="small danger" title="Remove this PDF from the project">Remove PDF</button>
+        </div>
+      </aside>
+      <div id="viewer">
+        <div id="stage">
+          <canvas id="baseCanvas"></canvas>
+          <canvas id="detailCanvas"></canvas>
+          <svg id="overlay" xmlns="http://www.w3.org/2000/svg"></svg>
+        </div>
+        <div id="hint" class="hint"></div>
+        <div id="empty" class="empty">
+          <h2>Open a PDF plan to start</h2>
+          <p>Your plans stay on this device. Nothing is uploaded.</p>
+          <button id="btnEmptyAdd" class="accent big">Open PDF…</button>
+        </div>
+        <div id="pageNav">
+          <button id="prevPage">‹</button><span id="pageLabel">–</span><button id="nextPage">›</button>
+        </div>
+      </div>
+      <aside id="panel">
+        <div id="selBox" class="box hidden"></div>
+        <div class="box">
+          <div class="boxHead">This page <span class="muted small" id="pageCount"></span></div>
+          <div id="pageTotals"></div>
+        </div>
+        <div class="box grow">
+          <div class="boxHead">Markups on this page</div>
+          <div id="markupList"></div>
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- ESTIMATE -->
+  <section id="view-estimate" class="view">
+    <div class="pagewrap">
+      <div class="rowHead">
+        <h2>Estimate <span class="muted" id="estProj"></span></h2>
+        <div class="actions noprint">
+          <button id="btnAddManual">+ Manual line</button>
+          <button id="btnExportCsv">Export CSV</button>
+          <button id="btnExportXlsx" class="accent">Export Excel (.xlsx)</button>
+          <button id="btnPrint">Print summary</button>
+        </div>
+      </div>
+      <div class="tableWrap"><table id="estTable" class="grid"></table></div>
+      <div id="estTotals" class="totals"></div>
+      <p class="muted small" id="estNote"></p>
+    </div>
+  </section>
+
+  <!-- PRODUCTS -->
+  <section id="view-products" class="view">
+    <div class="pagewrap">
+      <div class="rowHead">
+        <h2>Products &amp; pricing <span class="muted small">(shared by all projects)</span></h2>
+        <div class="actions">
+          <input id="prodSearch" type="search" placeholder="Search…">
+          <button id="btnAddProduct" class="accent">+ Product</button>
+          <button id="btnImportCsv">Import CSV</button>
+          <button id="btnExportProducts">Export CSV</button>
+        </div>
+      </div>
+      <div class="tableWrap"><table id="prodTable" class="grid"></table></div>
+      <p class="muted small">CSV columns: name, category, unit, unit_price, labor_price, waste_pct, color, multiplier. Multiplier converts what you measure into the product's unit (for example 0.03125 turns SF into 4×8 sheets).</p>
+    </div>
+  </section>
+
+  <!-- CHECKLIST -->
+  <section id="view-checklist" class="view">
+    <div class="pagewrap narrow">
+      <div class="rowHead">
+        <h2>Checklist <span class="muted" id="ckProj"></span></h2>
+        <div class="actions">
+          <select id="tplSelect"></select>
+          <button id="btnApplyTpl">Apply template</button>
+          <button id="btnSaveTpl">Save as template</button>
+          <button id="btnManageTpl">Templates…</button>
+        </div>
+      </div>
+      <form id="ckAdd" class="ckAdd">
+        <input id="ckText" placeholder="Add an item, e.g. Verify ceiling height" autocomplete="off">
+        <button class="accent">Add</button>
+      </form>
+      <div id="ckProgress" class="muted small"></div>
+      <ul id="ckList"></ul>
+    </div>
+  </section>
+</main>
+
+<div id="printArea"></div>
+<div id="modalBack" class="hidden"><div id="modal"></div></div>
+<div id="toast"></div>
+<input type="file" id="filePdf" accept="application/pdf,.pdf" multiple hidden>
+<input type="file" id="fileCsv" accept=".csv,text/csv" hidden>
+<input type="file" id="fileBackup" accept=".dtakeoff,.json,application/json" hidden>
+<script type="module" src="app.js"></script>
+</body>
+</html>

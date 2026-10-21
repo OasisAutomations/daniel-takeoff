@@ -1,0 +1,16 @@
+{
+  "name": "Daniel Takeoff",
+  "short_name": "Takeoff",
+  "description": "PDF plan takeoffs: scale, length, area, count, pricing, estimates and checklists. Everything stays on this device.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1c2126",
+  "theme_color": "#1c2126",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
