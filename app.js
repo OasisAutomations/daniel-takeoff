@@ -1,8 +1,9 @@
 // Daniel Takeoff — everything stays on this device (IndexedDB). No uploads, no analytics.
 import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
+import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.3';
+const VER = 'v1.4';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -71,9 +72,11 @@ function nearPreset(ftPerPt) { const p = SCALES.find(s => Math.abs(s.ftPerPt - f
 const S = {
   project: null, products: [], templates: [], docs: new Map(),
   docId: null, pageNum: 1, page: null, W: 0, H: 0, z: 1, tx: 0, ty: 0, baseRes: 1, token: 0,
-  tool: 'select', activeProductId: '', drawing: null, countId: null, selId: null, hover: null,
+  tool: 'select', activeProductId: '', drawing: null, countId: null, hover: null, sel: new Set(), _pri: null, multi: false, clip: null,
   undo: [], redo: [], view: 'plans', ckOpen: new Set(),
 };
+// Selection: S.sel is the set of selected markup ids; S.selId is the "primary" one (kept for older code paths).
+Object.defineProperty(S, 'selId', { enumerable: true, get() { return this._pri; }, set(v) { this.sel = new Set(v ? [v] : []); this._pri = v || null; } });
 const prodById = id => S.products.find(p => p.id === id) || null;
 
 /* ---------- UI helpers ---------- */
@@ -322,8 +325,19 @@ function geo(m) {
   if (m.type === 'length') { const lf = polyLen(m.pts) * k; return { lf, sf: m.height > 0 ? lf * m.height : null }; }
   return { sf: shoelace(m.pts) * k * k, lf: polyLen(m.pts, true) * k };
 }
+// Quantity formula variables for one markup (see formula.js). Every value is a plain number.
+function fxVars(m, g, base, prod) {
+  const len = m.type === 'count' ? 0 : (g.lf || 0), area = m.type === 'count' ? 0 : (g.sf || 0);
+  const per = m.type === 'count' ? 0 : (g.lf || 0), cnt = m.type === 'count' ? g.ea : 1;
+  return { length: len, lf: len, area, sf: area, perimeter: per, count: cnt, ea: cnt, height: m.height > 0 ? m.height : 0, qty: base, mult: prod?.mult > 0 ? prod.mult : 1 };
+}
 function qtyFor(m, prod) {   // quantity in the product's unit
   const g = geo(m); if (g.noscale) return null;
+  const base = qtyDefault(m, g, prod);
+  if (prod && String(prod.formula || '').trim()) { try { return fxEval(prod.formula, fxVars(m, g, base, prod)); } catch { return base; } }
+  return base;
+}
+function qtyDefault(m, g, prod) {
   const u = String(prod?.unit || '').toUpperCase(), mult = prod?.mult > 0 ? prod.mult : 1;
   if (m.type === 'count') return g.ea * mult;
   if (m.type === 'length') return (u !== 'LF' && g.sf != null ? g.sf : g.lf) * mult;   // wall height set → SF (unless product is LF)
@@ -344,10 +358,14 @@ function renderOverlay() {
   clearTimeout(ovT);
   if (!S.page || !S.project) { world.innerHTML = ''; return; }
   S.ovZ = S.z; world.setAttribute('transform', `translate(${S.tx} ${S.ty}) scale(${S.z})`);
-  const z = S.z, fs = 12.5 / z, halo = 3.2 / z; let h = '';
-  const txt = (x, y, s, col, anchor = 'middle') => `<text x="${x}" y="${y}" font-size="${fs}" fill="${col}" stroke-width="${halo}" text-anchor="${anchor}" dominant-baseline="middle">${esc(s)}</text>`;
+  const z = S.z; let h = '';
+  // value labels are dark pills with big bold white text: always screen-sized, readable at any zoom
+  const txt = (x, y, s, col, anchor = 'middle') => {
+    const fs = 15 / z, w = s.length * 0.62 * fs + 14 / z, hh = fs * 1.5, x0 = anchor === 'start' ? x : x - w / 2;
+    return `<rect x="${x0}" y="${y - hh / 2}" width="${w}" height="${hh}" rx="${6 / z}" fill="#0f151a" fill-opacity=".92" stroke="${col}" stroke-width="${1.8 / z}"/><text class="lbl" x="${x0 + 7 / z}" y="${y + 0.5 / z}" font-size="${fs}" text-anchor="start" dominant-baseline="middle">${esc(s)}</text>`;
+  };
   for (const m of pageMarkups()) {
-    const c = colorOf(m), sel = m.id === S.selId || m.id === S.countId, sw = sel ? 4 : 2.6, P = m.pts.map(p => p.join(',')).join(' ');
+    const c = colorOf(m), sel = S.sel.has(m.id) || m.id === S.countId, sw = sel ? 4 : 2.6, P = m.pts.map(p => p.join(',')).join(' ');
     if (m.type === 'length') {
       if (sel) h += `<polyline points="${P}" fill="none" stroke="#fff" stroke-width="${sw + 3}" vector-effect="non-scaling-stroke" stroke-linejoin="round" opacity=".8"/>`;
       h += `<polyline points="${P}" fill="none" stroke="${c}" stroke-width="${sw}" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>`;
@@ -357,11 +375,11 @@ function renderOverlay() {
       if (sel) h += `<polygon points="${P}" fill="none" stroke="${c}" stroke-width="${sw}" vector-effect="non-scaling-stroke"/>`;
       const [cx, cy] = centroid(m.pts); h += txt(cx, cy, valueText(m), c);
     } else {
-      const r = (sel ? 8.5 : 7) / z;
-      m.pts.forEach((p, i) => { h += `<circle cx="${p[0]}" cy="${p[1]}" r="${r}" fill="${c}" stroke="#fff" stroke-width="${1.6 / z}"/><text x="${p[0]}" y="${p[1] + 0.5 / z}" font-size="${8.5 / z}" fill="#fff" stroke="none" text-anchor="middle" dominant-baseline="middle">${i + 1}</text>`; });
-      if (m.pts.length) { const p = m.pts[m.pts.length - 1]; h += txt(p[0] + 12 / z, p[1] - 12 / z, `${m.pts.length} EA`, c, 'start'); }
+      const nd = String(m.pts.length).length, r = ((nd >= 3 ? 15 : nd === 2 ? 13 : 12) + (sel ? 2 : 0)) / z, nfs = (nd >= 3 ? 14 : 16) / z;
+      m.pts.forEach((p, i) => { h += `<circle cx="${p[0]}" cy="${p[1]}" r="${r}" fill="${c}" stroke="${sel ? '#ffd23f' : '#fff'}" stroke-width="${(sel ? 3 : 2) / z}"/><text class="cnum" x="${p[0]}" y="${p[1] + 0.5 / z}" font-size="${nfs}" stroke-width="${3.4 / z}" text-anchor="middle" dominant-baseline="central">${i + 1}</text>`; });
+      if (m.pts.length) { const p = m.pts[m.pts.length - 1]; h += txt(p[0] + (r + 4 / z), p[1] - (r + 4 / z), `${m.pts.length} EA`, c, 'start'); }
     }
-    if (m.id === S.selId && m.type !== 'count') { const hs = 9 / z; for (const p of m.pts) h += `<rect x="${p[0] - hs / 2}" y="${p[1] - hs / 2}" width="${hs}" height="${hs}" fill="#fff" stroke="${c}" stroke-width="${1.8 / z}"/>`; }
+    if (m.id === S.selId && S.sel.size === 1 && m.type !== 'count') { const hs = 9 / z; for (const p of m.pts) h += `<rect x="${p[0] - hs / 2}" y="${p[1] - hs / 2}" width="${hs}" height="${hs}" fill="#fff" stroke="${c}" stroke-width="${1.8 / z}"/>`; }
   }
   world.innerHTML = h + '<g id="pv"></g>';
   renderPreview();
@@ -381,7 +399,7 @@ function renderPreview() {
     if (d.type === 'length' && k) lab = fmtFtIn(polyLen(pts) * k);
     if (d.type === 'area' && k && pts.length > 2) lab = fmtN(shoelace(pts) * k * k) + ' SF';
     if (d.type === 'calibrate' && pts.length > 1 && k) lab = fmtFtIn(polyLen(pts) * k) + ' (current scale)';
-    if (lab) h += `<text x="${e[0] + 10 / z}" y="${e[1] + 16 / z}" font-size="${12.5 / z}" fill="${c}" stroke-width="${3.2 / z}">${esc(lab)}</text>`;
+    if (lab) { const fs = 15 / z, w = lab.length * 0.62 * fs + 14 / z; h += `<rect x="${e[0] + 10 / z}" y="${e[1] + 16 / z - fs * 0.75}" width="${w}" height="${fs * 1.5}" rx="${6 / z}" fill="#0f151a" fill-opacity=".92" stroke="${c}" stroke-width="${1.8 / z}"/><text class="lbl" x="${e[0] + 17 / z}" y="${e[1] + 16.5 / z}" font-size="${fs}" dominant-baseline="middle">${esc(lab)}</text>`; }
   }
   g.innerHTML = h;
 }
@@ -402,7 +420,7 @@ function setTool(t) {
   $$('.tool').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
   viewer.classList.toggle('drawing', t !== 'select');
   const h = $('#hint'); h.textContent = HINTS[t] || ''; h.classList.toggle('on', !!HINTS[t]);
-  updateFinish(); renderOverlay();
+  updateFinish(); renderOverlay(); refreshActiveProduct();
 }
 function cancelDrawing() { S.drawing = null; S.countId = null; S.hover = null; updateFinish(); }
 function updateFinish() { $('#btnFinish').disabled = !((S.drawing && S.drawing.pts.length) || S.countId); }
@@ -430,7 +448,11 @@ function finishDrawing() {
 }
 function tap(sx, sy, e) {
   const q = toPage(sx, sy), t = S.tool;
-  if (t === 'select') { const hit = hitTest(q); S.selId = hit?.id || null; renderOverlay(); refreshPanel(); return; }
+  if (t === 'select') {
+    const hit = hitTest(q), add = e && (e.shiftKey || e.ctrlKey || e.metaKey) || S.multi;
+    if (add) { if (hit) toggleSel(hit.id); } else S.selId = hit?.id || null;
+    renderOverlay(); refreshPanel(); return;
+  }
   if (t === 'count') {
     let m = S.countId && S.project.markups.find(x => x.id === S.countId && x.docId === S.docId && x.page === S.pageNum);
     if (m) { const lp = m.pts[m.pts.length - 1]; if (lp && Date.now() - (S.lastTap || 0) < 280 && dist(lp, q) * S.z < 5) return; }
@@ -450,6 +472,9 @@ function tap(sx, sy, e) {
   S.lastTap = now; d.pts.push(p); d.shift = e.shiftKey; updateFinish(); renderPreview();
   if (t === 'calibrate' && d.pts.length === 2) { const dp = dist(d.pts[0], d.pts[1]); const pts = d.pts; S.drawing = null; renderPreview(); calibrateModal(dp, pts); }
 }
+const selMarks = () => pageMarkups().filter(m => S.sel.has(m.id));
+function setSelection(ids) { ids = [...ids]; S.sel = new Set(ids); S._pri = ids.length ? ids[ids.length - 1] : null; }
+function toggleSel(id) { if (S.sel.has(id)) { S.sel.delete(id); if (S._pri === id) S._pri = [...S.sel].pop() || null; } else { S.sel.add(id); S._pri = id; } }
 function segDist(p, a, b) { const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy; let t = L ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L : 0; t = clamp(t, 0, 1); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); }
 function inPoly(p, pts) { let c = false; for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) { const a = pts[i], b = pts[j]; if ((a[1] > p[1]) !== (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; }
 function hitTest(q) {
@@ -463,6 +488,7 @@ function hitTest(q) {
   return best;
 }
 function hitHandle(q) {
+  if (S.sel.size !== 1) return null;
   const m = S.project.markups.find(x => x.id === S.selId); if (!m || m.docId !== S.docId || m.page !== S.pageNum) return null;
   const tol = (COARSE ? 16 : 9) / S.z;
   for (let i = 0; i < m.pts.length; i++) if (dist(m.pts[i], q) < tol) return { m, i };
@@ -473,7 +499,7 @@ function hitHandle(q) {
 const ptrs = new Map(); let G = null, spaceDown = false;
 const local = e => { const r = viewer.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
 viewer.addEventListener('pointerdown', e => {
-  if (!S.page || e.target.closest('#pageNav,#empty')) return;
+  if (!S.page || e.target.closest('#pageNav,#empty,#selBar')) return;
   try { viewer.setPointerCapture(e.pointerId); } catch { }
   const p = local(e); ptrs.set(e.pointerId, p);
   if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; G = { type: 'pinch', d0: dist(a, b) || 1, m0: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], z0: S.z, tx0: S.tx, ty0: S.ty }; return; }
@@ -481,6 +507,11 @@ viewer.addEventListener('pointerdown', e => {
   if (e.button === 1 || e.button === 2 || spaceDown) { G = { type: 'pan', s: p, tx0: S.tx, ty0: S.ty }; viewer.classList.add('panning'); e.preventDefault(); return; }
   if (S.tool === 'select' && S.selId) { const h = hitHandle(toPage(...p)); if (h) { pushUndo(); G = { type: 'vertex', ...h }; return; } }
   G = { type: 'pending', s: p, tx0: S.tx, ty0: S.ty, thr: e.pointerType === 'touch' ? 10 : 5 };
+  if (S.tool === 'select') {
+    const add = e.shiftKey || e.ctrlKey || e.metaKey || S.multi, hit = hitTest(toPage(...p));
+    if (hit && S.sel.has(hit.id) && !add) G.type = 'movecand';           // drag a selected item (or the whole selection) to move it
+    else if (!hit && (e.shiftKey || e.ctrlKey || e.metaKey)) G.marq = true;   // Shift/Ctrl + drag on empty space = box select
+  }
 });
 viewer.addEventListener('pointermove', e => {
   const p = local(e);
@@ -490,19 +521,45 @@ viewer.addEventListener('pointermove', e => {
     const nz = clamp(G.z0 * d / G.d0, fitZ() * 0.25, 60), px = (G.m0[0] - G.tx0) / G.z0, py = (G.m0[1] - G.ty0) / G.z0;
     S.z = nz; S.tx = m[0] - px * nz; S.ty = m[1] - py * nz; applyT(); return;
   }
+  if (G?.type === 'movecand' && dist(p, G.s) > G.thr) {
+    pushUndo(); G.type = 'move'; G.items = selMarks().map(m => ({ m, pts0: m.pts.map(q => q.slice()) }));
+  }
+  if (G?.type === 'move') {
+    const dx = (p[0] - G.s[0]) / S.z, dy = (p[1] - G.s[1]) / S.z;
+    for (const it of G.items) it.m.pts = it.pts0.map(q => [q[0] + dx, q[1] + dy]);
+    G.moved = true; renderOverlay(); return;
+  }
+  if (G?.type === 'pending' && G.marq && dist(p, G.s) > G.thr) { G.type = 'marquee'; }
+  if (G?.type === 'marquee') { G.cur = p; drawMarquee(G.s, p); return; }
   if (G?.type === 'pending' && dist(p, G.s) > G.thr) { G.type = 'pan'; viewer.classList.add('panning'); }
   if (G?.type === 'pan') { S.tx = G.tx0 + p[0] - G.s[0]; S.ty = G.ty0 + p[1] - G.s[1]; applyT(); return; }
   if (G?.type === 'vertex') { G.m.pts[G.i] = toPage(...p); G.moved = true; renderOverlay(); return; }
   if (!G && S.drawing && e.pointerType !== 'touch') { S.hover = toPage(...p); S.drawing.shift = e.shiftKey; renderPreview(); }
 });
+function drawMarquee(a, b) {
+  const el = $('#marquee'); el.classList.remove('hidden');
+  Object.assign(el.style, { left: Math.min(a[0], b[0]) + 'px', top: Math.min(a[1], b[1]) + 'px', width: Math.abs(a[0] - b[0]) + 'px', height: Math.abs(a[1] - b[1]) + 'px' });
+}
+function hideMarquee() { $('#marquee').classList.add('hidden'); }
+function finishMarquee(a, b, add) {
+  const [x1, y1] = toPage(Math.min(a[0], b[0]), Math.min(a[1], b[1])), [x2, y2] = toPage(Math.max(a[0], b[0]), Math.max(a[1], b[1]));
+  const ids = pageMarkups().filter(m => {
+    const xs = m.pts.map(q => q[0]), ys = m.pts.map(q => q[1]);
+    return Math.min(...xs) <= x2 && Math.max(...xs) >= x1 && Math.min(...ys) <= y2 && Math.max(...ys) >= y1;
+  }).map(m => m.id);
+  setSelection(add ? [...new Set([...S.sel, ...ids])] : ids);
+  renderOverlay(); refreshPanel();
+}
 function endPtr(e, cancel) {
   const had = ptrs.delete(e.pointerId); viewer.classList.remove('panning');
   if (!G) return;
   if (G.type === 'pinch') { if (ptrs.size === 0) G = null; return; }
   if (ptrs.size) return;
   const g = G; G = null;
-  if (cancel || !had) return;
-  if (g.type === 'pending') tap(...local(e), e);
+  if (cancel || !had) { if (g.type === 'marquee') hideMarquee(); if (g.type === 'move' && g.moved) { touch(); refreshPanel(); } return; }
+  if (g.type === 'pending' || g.type === 'movecand') tap(...local(e), e);
+  if (g.type === 'move') { if (g.moved) { touch(); refreshPanel(); } else S.undo.pop(); }
+  if (g.type === 'marquee') { hideMarquee(); finishMarquee(g.s, g.cur || g.s, e.shiftKey || e.ctrlKey || e.metaKey); }
   if (g.type === 'vertex') { if (g.moved) { touch(); refreshPanel(); } else S.undo.pop(); }
 }
 viewer.addEventListener('pointerup', e => endPtr(e, false));
@@ -520,11 +577,18 @@ document.addEventListener('keydown', e => {
   const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
   if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (mod && k === 'y') { e.preventDefault(); redo(); return; }
+  if (S.view === 'plans' && mod && S.page) {
+    if (k === 'c') { if (S.sel.size) { e.preventDefault(); copySel(); } return; }
+    if (k === 'x') { if (S.sel.size) { e.preventDefault(); copySel(); deleteSelected(); } return; }
+    if (k === 'v') { if (S.clip) { e.preventDefault(); pasteClip(); } return; }
+    if (k === 'd') { e.preventDefault(); duplicateSel(); return; }
+    if (k === 'a') { e.preventDefault(); selectAllPage(); return; }
+  }
   if (S.view !== 'plans' || mod) return;
   if (k === ' ') { spaceDown = true; e.preventDefault(); }
   else if (k === 'enter') finishDrawing();
   else if (k === 'escape') { if (S.drawing || S.countId) { cancelDrawing(); renderOverlay(); } else setTool('select'); }
-  else if (k === 'backspace' || k === 'delete') { if (S.drawing?.pts.length) undo(); else if (S.selId) deleteMarkup(S.selId); e.preventDefault(); }
+  else if (k === 'backspace' || k === 'delete') { if (S.drawing?.pts.length) undo(); else if (S.sel.size) deleteSelected(); e.preventDefault(); }
   else if (k === 'v') setTool('select'); else if (k === 'l') setTool('length'); else if (k === 'a') setTool('area'); else if (k === 'c') setTool('count');
   else if (k === 'f') fitPage(); else if (k === '+' || k === '=') zoomAt(1.25, viewer.clientWidth / 2, viewer.clientHeight / 2); else if (k === '-') zoomAt(0.8, viewer.clientWidth / 2, viewer.clientHeight / 2);
   else if (k === 'pagedown') gotoPage(1); else if (k === 'pageup') gotoPage(-1);
@@ -616,20 +680,32 @@ function productOptions(selected, emptyLabel = '— No product —') {
   const cats = {}; for (const p of [...S.products].sort((a, b) => (a.category || '').localeCompare(b.category || '') || a.name.localeCompare(b.name))) (cats[p.category || 'Uncategorized'] ||= []).push(p);
   return `<option value="">${emptyLabel}</option>` + Object.entries(cats).map(([c, ps]) => `<optgroup label="${esc(c)}">${ps.map(p => `<option value="${p.id}" ${p.id === selected ? 'selected' : ''}>${esc(p.name)} (${esc(p.unit)})</option>`).join('')}</optgroup>`).join('');
 }
+// ONE product picker (top bar). With markups selected it sets THEIR product; otherwise it is the product the next markup is drawn with.
+function pickerMode() { return S.tool === 'select' && selMarks().length ? 'sel' : 'new'; }
 function refreshActiveProduct() {
-  const sel = $('#activeProduct'); if (S.activeProductId && !prodById(S.activeProductId)) S.activeProductId = '';
-  sel.innerHTML = productOptions(S.activeProductId, S.products.length ? '— No product —' : '— Add products in Products tab —');
-  sel.value = S.activeProductId; const p = prodById(S.activeProductId);
+  const sel = $('#activeProduct'), lab = $('#prodLabel'); if (S.activeProductId && !prodById(S.activeProductId)) S.activeProductId = '';
+  const mode = pickerMode(), picked = mode === 'sel' ? selMarks() : [];
+  let val = S.activeProductId, mixed = false;
+  if (mode === 'sel') { const ids = new Set(picked.map(m => m.productId || '')); if (ids.size === 1) val = [...ids][0]; else { mixed = true; val = '__mixed'; } }
+  sel.innerHTML = (mixed ? '<option value="__mixed" disabled>— Mixed products —</option>' : '') + productOptions(mixed ? '' : val, S.products.length ? '— No product —' : '— Add products in Products tab —');
+  sel.value = val; const p = mixed ? null : prodById(val);
   sel.style.borderColor = p ? p.color : '';
+  lab.textContent = mode === 'sel' ? `Selected (${picked.length}):` : S.tool === 'select' ? 'Next markup:' : 'Draw with:';
+  lab.title = mode === 'sel' ? 'Changing this changes the product of the selected markups' : 'The product used for the next thing you draw';
+  $('#prodGroup').classList.toggle('selmode', mode === 'sel');
 }
 
 /* ======================= RIGHT PANEL ======================= */
 function refreshPanel() {
   const list = $('#markupList'), tot = $('#pageTotals'), selBox = $('#selBox');
-  if (!S.project || !S.page) { list.innerHTML = '<p class="muted small">No page open.</p>'; tot.innerHTML = ''; selBox.classList.add('hidden'); $('#pageCount').textContent = ''; return; }
-  const ms = pageMarkups(); $('#pageCount').textContent = ms.length ? ms.length + ' markups' : '';
-  list.innerHTML = ms.map(m => `<div class="mrow ${m.id === S.selId ? 'on' : ''}" data-id="${m.id}"><span class="sw" style="background:${colorOf(m)}"></span><span class="mname">${esc(markName(m))}</span><span class="mval">${esc(valueText(m).split(' · ')[0])}</span></div>`).join('') || '<p class="muted small">Pick a tool above and tap on the plan.</p>';
-  list.querySelectorAll('.mrow').forEach(r => r.onclick = () => { S.selId = r.dataset.id; if (S.tool !== 'select') setTool('select'); renderOverlay(); refreshPanel(); });
+  if (!S.project || !S.page) { list.innerHTML = '<p class="muted small">No page open.</p>'; tot.innerHTML = ''; selBox.classList.add('hidden'); $('#pageCount').textContent = ''; $('#selBar').classList.add('hidden'); return; }
+  const ms = pageMarkups(); $('#pageCount').textContent = ms.length ? `(${ms.length})` : '';
+  for (const id of [...S.sel]) if (!ms.some(m => m.id === id)) S.sel.delete(id);
+  if (S._pri && !S.sel.has(S._pri)) S._pri = [...S.sel].pop() || null;
+  refreshSelBar(); refreshActiveProduct();
+  $('#btnPaste').disabled = !S.clip;
+  list.innerHTML = ms.map(m => `<div class="mrow ${S.sel.has(m.id) ? 'on' : ''}" data-id="${m.id}"><span class="sw" style="background:${colorOf(m)}"></span><span class="mname">${esc(markName(m))}</span><span class="mval">${esc(valueText(m).split(' · ')[0])}</span></div>`).join('') || '<p class="muted small">Pick a tool above and tap on the plan.</p>';
+  list.querySelectorAll('.mrow').forEach(r => r.onclick = e => { if (S.tool !== 'select') setTool('select'); if (e.shiftKey || e.ctrlKey || e.metaKey || S.multi) toggleSel(r.dataset.id); else S.selId = r.dataset.id; renderOverlay(); refreshPanel(); });
   // per-product totals for this page
   const agg = new Map();
   for (const m of ms) {
@@ -639,7 +715,20 @@ function refreshPanel() {
   }
   tot.innerHTML = [...agg.values()].map(a => `<div class="trow"><span><span class="sw" style="display:inline-block;background:${a.color};margin-right:6px"></span>${esc(a.name)}</span><b>${fmtQty(a.q, a.unit)} ${esc(a.unit)}</b></div>`).join('') || '<p class="muted small">No quantities yet.</p>';
   // selected markup
-  const m = S.project.markups.find(x => x.id === S.selId && x.docId === S.docId && x.page === S.pageNum);
+  const picked = selMarks();
+  if (picked.length > 1) {
+    const types = { length: 0, area: 0, count: 0 }; picked.forEach(m => types[m.type]++);
+    const parts = Object.entries(types).filter(([, n]) => n).map(([t, n]) => `${n} ${t}${n > 1 && t !== 'count' ? 's' : ''}`).join(', ');
+    const nm = new Set(picked.map(m => m.productId || '')).size;
+    selBox.classList.remove('hidden');
+    selBox.innerHTML = `<div class="boxHead">${picked.length} selected<button class="small" id="sClose">✕</button></div>
+      <div class="small">${esc(parts)}</div>
+      <div class="muted small" style="margin-top:4px">Drag any selected item to move them all. Use the bar on the plan to copy, duplicate, combine counts or delete. Change the product with the Product box at the top.</div>
+      ${nm > 1 ? '<div class="muted small">They use different products.</div>' : ''}`;
+    selBox.querySelector('#sClose').onclick = () => { S.selId = null; renderOverlay(); refreshPanel(); };
+    return;
+  }
+  const m = picked[0];
   if (!m) { selBox.classList.add('hidden'); return; }
   selBox.classList.remove('hidden'); const g = geo(m), p = prodById(m.productId);
   const q = p ? qtyFor(m, p) : null;
@@ -648,17 +737,64 @@ function refreshPanel() {
     ${m.type === 'area' && !g.noscale ? `<div class="muted small">Perimeter ${fmtFtIn(g.lf)} (${fmtN(g.lf)} LF)</div>` : ''}
     ${m.type === 'length' && !g.noscale ? `<div class="muted small">${fmtN(g.lf)} LF</div>` : ''}
     ${p && q != null ? `<div class="small">Counts as <b>${fmtQty(q, p.unit)} ${esc(p.unit)}</b> of ${esc(p.name)}</div>` : ''}
-    <div class="field"><label>Product</label><select id="sProd">${productOptions(m.productId)}</select></div>
+    <div class="field"><label>Product</label><div class="roProd"><span class="sw" style="background:${colorOf(m)}"></span><b>${p ? esc(p.name) + ' (' + esc(p.unit) + ')' : 'No product'}</b><button class="small" id="sProdChange" title="Opens the Product box at the top">Change…</button></div></div>
     <div class="field"><label>Note / label</label><input id="sLabel" value="${esc(m.label)}" placeholder="e.g. Kitchen north wall"></div>
     ${m.type === 'length' ? `<div class="field"><label>Wall height in ft (optional, turns length into SF)</label><input id="sHeight" inputmode="decimal" value="${m.height || ''}" placeholder="e.g. 9"></div>` : ''}
     <div class="actions" style="margin-top:8px">${m.type === 'count' ? '<button class="small" id="sAddCount">+ Add to this count</button>' : '<span class="muted small">Drag the white squares to edit points.</span>'}<button class="small danger" id="sDel" style="margin-left:auto">Delete</button></div>`;
   selBox.querySelector('#sClose').onclick = () => { S.selId = null; renderOverlay(); refreshPanel(); };
-  selBox.querySelector('#sProd').onchange = e => { pushUndo(); m.productId = e.target.value || null; if (!m.productId) m.color = TYPE_COLOR[m.type]; touch(); renderOverlay(); refreshPanel(); };
+  selBox.querySelector('#sProdChange').onclick = () => { const s = $('#activeProduct'); s.scrollIntoView?.({ block: 'nearest' }); s.focus(); try { s.showPicker?.(); } catch { } };
   selBox.querySelector('#sLabel').onchange = e => { pushUndo(); m.label = e.target.value.trim(); touch(); renderOverlay(); refreshPanel(); };
   const hEl = selBox.querySelector('#sHeight'); if (hEl) hEl.onchange = e => { pushUndo(); const v = num(e.target.value, 0); m.height = v > 0 ? v : null; touch(); renderOverlay(); refreshPanel(); };
   selBox.querySelector('#sDel').onclick = () => deleteMarkup(m.id);
   const ac = selBox.querySelector('#sAddCount'); if (ac) ac.onclick = () => { setTool('count'); S.countId = m.id; S.selId = m.id; updateFinish(); renderOverlay(); toast('Tap to add more to this count'); };
 }
+/* ----- selection actions: copy / paste / duplicate / delete / combine counts ----- */
+const cloneM = m => JSON.parse(JSON.stringify(m));
+function refreshSelBar() {
+  const n = selMarks().length, bar = $('#selBar');
+  bar.classList.toggle('hidden', !n || S.tool !== 'select');
+  $('#selN').textContent = n + ' selected';
+  const nc = selMarks().filter(m => m.type === 'count').length;
+  bar.querySelector('[data-sa=combine]').disabled = nc < 2;
+  bar.querySelector('[data-sa=paste]').disabled = !S.clip;
+  $('#btnMulti').classList.toggle('on', S.multi);
+}
+function copySel() {
+  const ms = selMarks(); if (!ms.length) return toast('Select something first');
+  S.clip = { items: ms.map(cloneM), docId: S.docId, page: S.pageNum, n: 0 }; refreshPanel(); toast(`Copied ${ms.length} — paste with Ctrl+V (works on other pages too)`);
+}
+function addClones(items, off) {
+  pushUndo();
+  const out = items.map(m => ({ ...cloneM(m), id: uid(), docId: S.docId, page: S.pageNum, pts: m.pts.map(q => [q[0] + off, q[1] + off]), created: Date.now() }));
+  S.project.markups.push(...out); setSelection(out.map(m => m.id));
+  touch(); renderOverlay(); refreshPanel(); markThumb(); return out.length;
+}
+function pasteClip() {
+  if (!S.clip || !S.page) return toast('Nothing copied yet');
+  const same = S.clip.docId === S.docId && S.clip.page === S.pageNum; S.clip.n = same ? S.clip.n + 1 : 0;
+  const k = addClones(S.clip.items, same ? 16 / S.z * S.clip.n : 0); toast(`Pasted ${k}`);
+}
+function duplicateSel() {
+  const ms = selMarks(); if (!ms.length) return toast('Select something first');
+  const k = addClones(ms, 16 / S.z); toast(`Duplicated ${k} — drag to place`);
+}
+function deleteSelected() {
+  const ids = new Set(selMarks().map(m => m.id)); if (!ids.size) return;
+  pushUndo(); S.project.markups = S.project.markups.filter(m => !ids.has(m.id)); if (ids.has(S.countId)) S.countId = null; S.selId = null;
+  touch(); renderOverlay(); refreshPanel(); markThumb(); updateFinish(); toast(`Deleted ${ids.size} — Undo to restore`);
+}
+function combineCounts() {
+  const cs = selMarks().filter(m => m.type === 'count'); if (cs.length < 2) return toast('Select two or more counts to combine');
+  pushUndo();
+  const target = cs.find(m => m.id === S.selId) || cs[0], names = new Set(cs.map(m => m.productId || ''));
+  for (const m of cs) if (m !== target) target.pts.push(...m.pts);
+  const gone = new Set(cs.filter(m => m !== target).map(m => m.id));
+  S.project.markups = S.project.markups.filter(m => !gone.has(m.id));
+  if (gone.has(S.countId)) S.countId = null; setSelection([target.id]);
+  touch(); renderOverlay(); refreshPanel(); markThumb(); updateFinish();
+  toast(`Combined into one count of ${target.pts.length}` + (names.size > 1 ? ` (kept ${prodById(target.productId)?.name || 'no product'})` : ''));
+}
+function selectAllPage() { if (!S.page) return; if (S.tool !== 'select') setTool('select'); setSelection(pageMarkups().map(m => m.id)); renderOverlay(); refreshPanel(); }
 function deleteMarkup(id) {
   pushUndo(); S.project.markups = S.project.markups.filter(m => m.id !== id);
   if (S.selId === id) S.selId = null; if (S.countId === id) S.countId = null;
@@ -679,7 +815,18 @@ function computeEstimate() {
     const w = num(r.prod.waste), qw = r.qty * (1 + w / 100), price = num(r.prod.price), lab = num(r.prod.labor);
     return { kind: 'product', id: r.prod.id, name: r.prod.name, category: r.prod.category || '', unit: r.prod.unit, qty: r.qty, waste: w, qtyW: qw, price, mat: qw * price, laborU: lab, labor: qw * lab, total: qw * (price + lab), n: r.n };
   });
-  const manual = P.manual.map(x => { const q = num(x.qty), pr = num(x.price), lb = num(x.labor), w = num(x.waste), qw = q * (1 + w / 100); return { kind: 'manual', id: x.id, name: x.desc || '', category: 'Manual', unit: x.unit || 'EA', qty: q, waste: w, qtyW: qw, price: pr, mat: qw * pr, laborU: lb, labor: qw * lb, total: qw * (pr + lb), productId: x.productId || null }; });
+  // estimate-line formulas: Q("name") measured qty, QW("name") with waste, N("name") markup count
+  const findLine = name => {
+    const k = String(name).trim().toLowerCase(), pool = [...lines, ...P.manual.filter(x => !(typeof x.qty === 'string' && x.qty.trim().startsWith('='))).map(x => ({ name: x.desc || '', qty: num(x.qty), qtyW: num(x.qty) * (1 + num(x.waste) / 100), n: 1 }))];
+    const ex = pool.filter(l => l.name.toLowerCase() === k), part = pool.filter(l => l.name.toLowerCase().includes(k));
+    const hit = ex.length ? ex : part;
+    if (hit.length !== 1) throw new Error(hit.length ? `"${name}" matches ${hit.length} lines, be more specific` : `No estimate line named "${name}"`);
+    return hit[0];
+  };
+  const fxFns = { q: n => findLine(n).qty, qw: n => findLine(n).qtyW, n: n => findLine(n).n };
+  const manual = P.manual.map(x => { let q, err = '', isF = typeof x.qty === 'string' && x.qty.trim().startsWith('=');
+    if (isF) { try { q = fxEval(x.qty, {}, fxFns); } catch (e) { q = 0; err = e.message; } } else q = num(x.qty);
+    const pr = num(x.price), lb = num(x.labor), w = num(x.waste), qw = q * (1 + w / 100); return { kind: 'manual', formula: isF, err, id: x.id, name: x.desc || '', category: 'Manual', unit: x.unit || 'EA', qty: q, waste: w, qtyW: qw, price: pr, mat: qw * pr, laborU: lb, labor: qw * lb, total: qw * (pr + lb), productId: x.productId || null }; });
   const all = [...lines, ...manual];
   const mat = all.reduce((s, l) => s + l.mat, 0), labor = all.reduce((s, l) => s + l.labor, 0);
   const taxPct = num(P.settings.taxPct), markupPct = num(P.settings.markupPct);
@@ -705,13 +852,13 @@ function renderEstimate() {
   if (E.manual.length) h += `<tr class="cat"><td colspan="${C}">Manual items</td></tr>`;
   for (const l of E.manual) {
     const x = S.project.manual.find(m => m.id === l.id);
-    h += `<tr data-mid="${l.id}"><td><input data-f="desc" value="${esc(x.desc)}" placeholder="Description"></td><td><input data-f="unit" value="${esc(x.unit || 'EA')}" style="width:60px"></td><td class="n"><input class="num" data-f="qty" inputmode="decimal" value="${esc(x.qty)}"></td><td class="n"><input class="num pct" data-f="waste" inputmode="decimal" value="${esc(x.waste || 0)}" title="Waste %"></td><td class="n"><b>${fmtQty(l.qtyW, l.unit)}</b></td>${P ? `<td class="n"><input class="num" data-f="price" inputmode="decimal" placeholder="$" value="${num(x.price) ? esc(x.price) : ''}"></td><td class="n">${m$(l.mat)}</td><td class="n"><input class="num" data-f="labor" inputmode="decimal" placeholder="$" value="${num(x.labor) ? esc(x.labor) : ''}"></td><td class="n">${m$(l.labor)}</td><td class="n"><b>${m$(l.total)}</b></td>` : ''}<td><button class="small danger" data-del="${l.id}">✕</button></td></tr>`;
+    h += `<tr data-mid="${l.id}"><td><input data-f="desc" value="${esc(x.desc)}" placeholder="Description"></td><td><input data-f="unit" value="${esc(x.unit || 'EA')}" style="width:60px"></td><td class="n"><input class="num${l.formula ? ' fxin' : ''}" data-f="qty" inputmode="${l.formula ? 'text' : 'decimal'}" value="${esc(x.qty)}" title="${l.err ? esc('Formula problem: ' + l.err) : l.formula ? 'Formula = ' + esc(String(l.qty)) : 'A number, or a formula starting with ='}">${l.err ? '<div class="fxerr">⚠ ' + esc(l.err) + '</div>' : ''}</td><td class="n"><input class="num pct" data-f="waste" inputmode="decimal" value="${esc(x.waste || 0)}" title="Waste %"></td><td class="n"><b>${fmtQty(l.qtyW, l.unit)}</b></td>${P ? `<td class="n"><input class="num" data-f="price" inputmode="decimal" placeholder="$" value="${num(x.price) ? esc(x.price) : ''}"></td><td class="n">${m$(l.mat)}</td><td class="n"><input class="num" data-f="labor" inputmode="decimal" placeholder="$" value="${num(x.labor) ? esc(x.labor) : ''}"></td><td class="n">${m$(l.labor)}</td><td class="n"><b>${m$(l.total)}</b></td>` : ''}<td><button class="small danger" data-del="${l.id}">✕</button></td></tr>`;
   }
   if (E.un.n) h += `<tr class="sub"><td colspan="${C}">Unassigned markups (${E.un.n}), not included: ${[E.un.LF && fmtN(E.un.LF) + ' LF', E.un.SF && fmtN(E.un.SF) + ' SF', E.un.EA && E.un.EA + ' EA'].filter(Boolean).join(' · ')}. Assign a product to include them.</td></tr>`;
   if (E.noScale) h += `<tr class="sub"><td colspan="${C}">${E.noScale} markups are on pages without a scale and are not included.</td></tr>`;
   if (!E.all.length) h += `<tr><td colspan="${C}" class="muted">No items yet. Measure on the plan with a product selected, or add a manual line.</td></tr>`;
   t.innerHTML = h;
-  t.querySelectorAll('tr[data-mid] input').forEach(inp => inp.onchange = () => { const x = S.project.manual.find(m => m.id === inp.closest('tr').dataset.mid); x[inp.dataset.f] = inp.dataset.f === 'desc' || inp.dataset.f === 'unit' ? inp.value : num(inp.value); touch(); renderEstimate(); });
+  t.querySelectorAll('tr[data-mid] input').forEach(inp => inp.onchange = () => { const x = S.project.manual.find(m => m.id === inp.closest('tr').dataset.mid); const f = inp.dataset.f, v = inp.value; x[f] = f === 'desc' || f === 'unit' ? v : (f === 'qty' && v.trim().startsWith('=')) ? v.trim() : num(v); touch(); renderEstimate(); });
   t.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { S.project.manual = S.project.manual.filter(m => m.id !== b.dataset.del); touch(); renderEstimate(); });
   const tot = $('#estTotals');
   tot.classList.toggle('hidden', !P);
@@ -724,7 +871,8 @@ function renderEstimate() {
     $('#eMk').onchange = e => { S.project.settings.markupPct = num(e.target.value); touch(); renderEstimate(); };
     $('#eTx').onchange = e => { S.project.settings.taxPct = num(e.target.value); touch(); renderEstimate(); };
   }
-  $('#estNote').textContent = P ? 'Qty = measured × (1 + waste %). Material = qty × unit price. Labor = qty × labor per unit. Markup % applies to material + labor; tax % applies to material only. Blank price cells = not priced.'
+  $('#btnFxHelp').onclick = fxHelpModal;
+  $('#estNote').textContent = P ? 'Qty = measured × (1 + waste %). Material = qty × unit price. Labor = qty × labor per unit. Markup % applies to material + labor; tax % applies to material only. Blank price cells = not priced. A manual quantity can be a formula: start it with = (see ƒx Formulas).'
     : 'Prices are hidden (quantities only), on screen and in print and exports. Turn on "Show prices" to price this estimate.';
 }
 function setShowPrices(v) {
@@ -788,13 +936,13 @@ function renderProducts() {
   const q = $('#prodSearch').value.trim().toLowerCase();
   const ps = [...S.products].filter(p => !q || (p.name + ' ' + p.category).toLowerCase().includes(q)).sort((a, b) => (a.category || '').localeCompare(b.category || '') || a.name.localeCompare(b.name));
   const used = {}; if (S.project) for (const m of S.project.markups) if (m.productId) used[m.productId] = (used[m.productId] || 0) + 1;
-  $('#prodTable').innerHTML = `<tr><th></th><th>Name</th><th>Category</th><th>Unit</th><th class="n">Unit price</th><th class="n">Labor/unit</th><th class="n">Waste</th><th class="n">Multiplier</th><th class="n">In this project</th><th></th></tr>` +
-    (ps.map(p => `<tr data-id="${p.id}"><td><span class="sw" style="background:${p.color}"></span></td><td>${esc(p.name)}</td><td>${esc(p.category)}</td><td>${esc(p.unit)}</td><td class="n">${fmt$(num(p.price))}</td><td class="n">${fmt$(num(p.labor))}</td><td class="n">${fmtN(num(p.waste), 1)}%</td><td class="n">${p.mult && p.mult !== 1 ? p.mult : ''}</td><td class="n">${used[p.id] || ''}</td>
-      <td class="n"><button class="small" data-act="use">Use</button> <button class="small" data-act="edit">Edit</button> <button class="small danger" data-act="del">✕</button></td></tr>`).join('') || `<tr><td colspan="10" class="muted">No products yet. Add one, or import a CSV.</td></tr>`);
+  $('#prodTable').innerHTML = `<tr><th></th><th>Name</th><th>Category</th><th>Unit</th><th class="n">Unit price</th><th class="n">Labor/unit</th><th class="n">Waste</th><th class="n">Multiplier</th><th>Formula</th><th class="n">In this project</th><th></th></tr>` +
+    (ps.map(p => `<tr data-id="${p.id}"><td><span class="sw" style="background:${p.color}"></span></td><td>${esc(p.name)}</td><td>${esc(p.category)}</td><td>${esc(p.unit)}</td><td class="n">${fmt$(num(p.price))}</td><td class="n">${fmt$(num(p.labor))}</td><td class="n">${fmtN(num(p.waste), 1)}%</td><td class="n">${p.mult && p.mult !== 1 ? p.mult : ''}</td><td class="small">${p.formula ? `<code title="${esc(fxProblem(p.formula) || 'Quantity formula')}">${fxProblem(p.formula) ? '⚠ ' : 'ƒx '}${esc(p.formula)}</code>` : ''}</td><td class="n">${used[p.id] || ''}</td>
+      <td class="n"><button class="small" data-act="use">Use</button> <button class="small" data-act="edit">Edit</button> <button class="small danger" data-act="del">✕</button></td></tr>`).join('') || `<tr><td colspan="11" class="muted">No products yet. Add one, or import a CSV.</td></tr>`);
   $$('#prodTable tr[data-id]').forEach(tr => tr.onclick = async e => {
     const act = e.target.closest('[data-act]')?.dataset.act, p = prodById(tr.dataset.id); if (!act) return;
     if (act === 'edit') productModal(p);
-    if (act === 'use') { S.activeProductId = p.id; refreshActiveProduct(); switchView('plans'); autoToolFor(p); }
+    if (act === 'use') { S.selId = null; S.activeProductId = p.id; refreshActiveProduct(); switchView('plans'); autoToolFor(p); }
     if (act === 'del') {
       const n = used[p.id] || 0;
       if (!await askConfirm('Delete product?', `Delete <b>${esc(p.name)}</b> from the library?${n ? ` ${n} markups in this project will become unassigned.` : ''} (Other projects that use it will show those markups as unassigned too.)`)) return;
@@ -816,16 +964,30 @@ function productModal(p) {
       <div class="field"><label>Color</label><input id="pColor" type="color" value="${p.color}"></div>
     </div>
     <div class="field"><label>Multiplier (optional): converts what you measure into this unit. 1 = no change. Example: 0.03125 turns SF into 4×8 sheets.</label><input id="pMult" inputmode="decimal" value="${p.mult || 1}"></div>
+    <div class="field"><label>Quantity formula (optional) <button type="button" class="small" id="pFxHelp">ƒx Help</button></label>
+      <input id="pFormula" value="${esc(p.formula || '')}" placeholder="e.g. ceil(Area / 32)   or   Length * Height - Count * 21" spellcheck="false" autocapitalize="off" autocomplete="off">
+      <select id="pFxPreset" style="margin-top:4px"><option value="">Insert an example…</option>${FX_PRESETS.map(([n, f]) => `<option value="${esc(f)}">${esc(n)}  →  ${esc(f)}</option>`).join('')}</select>
+      <div class="small" id="pFxOut" style="margin-top:4px"></div><div id="pFxHelpBox" class="fxhelp hidden">${FX_HELP}</div></div>
     <p class="muted small">Length markups count as LF (or wall SF when a wall height is set and the unit isn't LF). Area markups count as SF (or their perimeter if the unit is LF). Count markups count as EA.</p>
     <div class="btns"><button type="button" data-close>Cancel</button><button class="accent">Save</button></div></form>`, (m, close) => {
+    const fxIn = m.querySelector('#pFormula'), fxOut = m.querySelector('#pFxOut');
+    const fxCheck = () => { const f = fxIn.value.trim(); if (!f) { fxOut.textContent = 'Blank: uses the measured quantity × multiplier.'; fxOut.className = 'small muted'; return true; } const er = fxProblem(f); fxOut.className = 'small ' + (er ? 'fxerr' : 'fxok'); fxOut.textContent = er ? '⚠ ' + er : `OK. Example: a 10 ft length / 100 SF area / 4 count (height 8) gives ${fmtN(fxEval(f, FX_SAMPLE), 3)}`; return !er; };
+    fxIn.oninput = fxCheck; fxCheck();
+    m.querySelector('#pFxPreset').onchange = e => { if (e.target.value) { fxIn.value = e.target.value; fxCheck(); } e.target.value = ''; };
+    m.querySelector('#pFxHelp').onclick = () => m.querySelector('#pFxHelpBox').classList.toggle('hidden');
     m.querySelector('#pf').onsubmit = async e => {
       e.preventDefault(); const v = id => m.querySelector(id).value;
-      Object.assign(p, { name: v('#pName').trim(), category: v('#pCat').trim(), unit: (v('#pUnit').trim() || 'EA').toUpperCase(), price: num(v('#pPrice')), labor: num(v('#pLabor')), waste: num(v('#pWaste')), color: v('#pColor'), mult: num(v('#pMult'), 1) || 1 });
+      if (!fxCheck()) return toast('Fix the quantity formula first (or clear it)');
+      Object.assign(p, { name: v('#pName').trim(), category: v('#pCat').trim(), unit: (v('#pUnit').trim() || 'EA').toUpperCase(), price: num(v('#pPrice')), labor: num(v('#pLabor')), waste: num(v('#pWaste')), color: v('#pColor'), mult: num(v('#pMult'), 1) || 1, formula: v('#pFormula').trim() });
       if (!p.name) return toast('Name is required');
       await saveProduct(p); const i = S.products.findIndex(x => x.id === p.id); if (i >= 0) S.products[i] = p; else S.products.push(p);
       close(); refreshActiveProduct(); renderProducts(); renderOverlay(); refreshPanel(); toast('Product saved');
     };
   });
+}
+const fxProblem = f => { try { fxEval(f, FX_SAMPLE); return ''; } catch (e) { return e.message; } };
+function fxHelpModal() {
+  openModal(`<h3>ƒx Formulas</h3>${FX_HELP}<div class="btns"><button class="accent" data-close>Done</button></div>`, () => { });
 }
 function parseCSV(text) {
   const rows = []; let row = [], f = '', q = false;
@@ -839,14 +1001,14 @@ function parseCSV(text) {
   return rows.filter(r => r.some(x => x.trim()));
 }
 function exportProductsCsv() {
-  const rows = [['name', 'category', 'unit', 'unit_price', 'labor_price', 'waste_pct', 'color', 'multiplier'], ...S.products.map(p => [p.name, p.category, p.unit, p.price, p.labor || 0, p.waste || 0, p.color, p.mult || 1])];
+  const rows = [['name', 'category', 'unit', 'unit_price', 'labor_price', 'waste_pct', 'color', 'multiplier', 'formula'], ...S.products.map(p => [p.name, p.category, p.unit, p.price, p.labor || 0, p.waste || 0, p.color, p.mult || 1, p.formula || ''])];
   download('products.csv', '\ufeff' + toCSV(rows), 'text/csv'); toast('Product library exported');
 }
 async function importProductsCsv(text) {
   const rows = parseCSV(text); if (rows.length < 2) return toast('No rows found in CSV');
   const hdr = rows[0].map(h => h.trim().toLowerCase().replace(/[^a-z]/g, ''));
   const col = (...names) => hdr.findIndex(h => names.includes(h));
-  const ix = { name: col('name', 'product', 'item'), cat: col('category', 'cat'), unit: col('unit', 'uom'), price: col('unitprice', 'price', 'cost'), labor: col('laborprice', 'labor', 'laborperunit'), waste: col('wastepct', 'waste', 'wastepercent'), color: col('color', 'colour'), mult: col('multiplier', 'mult', 'factor') };
+  const ix = { name: col('name', 'product', 'item'), cat: col('category', 'cat'), unit: col('unit', 'uom'), price: col('unitprice', 'price', 'cost'), labor: col('laborprice', 'labor', 'laborperunit'), waste: col('wastepct', 'waste', 'wastepercent'), color: col('color', 'colour'), mult: col('multiplier', 'mult', 'factor'), formula: col('formula', 'quantityformula', 'qtyformula') };
   if (ix.name < 0) return toast('CSV needs a "name" column');
   let added = 0, updated = 0;
   for (const r of rows.slice(1)) {
@@ -854,6 +1016,7 @@ async function importProductsCsv(text) {
     const cat = g('cat'); let p = S.products.find(x => x.name.toLowerCase() === name.toLowerCase() && (x.category || '').toLowerCase() === cat.toLowerCase());
     const isNew = !p; p ||= { id: uid(), color: PALETTE[(S.products.length + added) % PALETTE.length] };
     Object.assign(p, { name, category: cat, unit: (g('unit') || p.unit || 'EA').toUpperCase(), price: num(g('price'), p.price || 0), labor: num(g('labor'), p.labor || 0), waste: num(g('waste'), p.waste || 0), mult: num(g('mult'), p.mult || 1) || 1 });
+    if (ix.formula >= 0) p.formula = g('formula');
     if (/^#[0-9a-f]{6}$/i.test(g('color'))) p.color = g('color');
     await saveProduct(p); if (isNew) { S.products.push(p); added++; } else updated++;
   }
@@ -955,13 +1118,19 @@ $('#btnAddPdf').onclick = $('#btnEmptyAdd').onclick = () => $('#filePdf').click(
 $('#filePdf').onchange = async e => { await addPdfFiles(e.target.files); e.target.value = ''; };
 $('#btnRemovePdf').onclick = removeCurrentPdf;
 $('#docSelect').onchange = async e => { if (e.target.value) { await showPage(e.target.value, 1); renderThumbs(); } };
-$('#activeProduct').onchange = e => { S.activeProductId = e.target.value; S.countId = null; updateFinish(); refreshActiveProduct(); autoToolFor(prodById(S.activeProductId)); };
+$('#activeProduct').onchange = e => {
+  const v = e.target.value; if (v === '__mixed') return;
+  if (pickerMode() === 'sel') {   // markups are selected: this box sets THEIR product
+    const ms = selMarks(); pushUndo(); for (const m of ms) { m.productId = v || null; m.color = v ? null : TYPE_COLOR[m.type]; }
+    touch(); renderOverlay(); refreshPanel(); markThumb(); toast(`${ms.length} markup${ms.length > 1 ? 's' : ''} → ${prodById(v)?.name || 'no product'}`); return;
+  }
+  S.activeProductId = v; S.countId = null; updateFinish(); refreshActiveProduct(); autoToolFor(prodById(S.activeProductId));
+};
 $('#btnFinish').onclick = finishDrawing; $('#btnUndo').onclick = undo; $('#btnRedo').onclick = redo;
 $('#btnScale').onclick = () => scaleModal(null);
 $('#zoomIn').onclick = () => zoomAt(1.3, viewer.clientWidth / 2, viewer.clientHeight / 2);
 $('#zoomOut').onclick = () => zoomAt(1 / 1.3, viewer.clientWidth / 2, viewer.clientHeight / 2);
 $('#zoomFit').onclick = fitPage;
-$('#togglePanel').onclick = () => { $('#panel').classList.toggle('closed'); setTimeout(() => S.page && scheduleDetail(), 50); };
 $('#prevPage').onclick = () => gotoPage(-1); $('#nextPage').onclick = () => gotoPage(1);
 $('#btnAddManual').onclick = () => { if (!S.project) return; S.project.manual.push({ id: uid(), desc: '', unit: 'EA', qty: 1, price: 0, labor: 0 }); touch(); renderEstimate(); const ins = $$('#estTable tr[data-mid] input[data-f=desc]'); ins[ins.length - 1]?.focus(); };
 $('#togPrices').onchange = e => setShowPrices(e.target.checked);
@@ -994,13 +1163,52 @@ async function start() {
   setTool('select'); setSave('');
 }
 start().catch(e => { console.error(e); toast('Startup error: ' + e.message, 6000); });
-window.DT = { S, applyT, fitPage, toScreen, detInfo: () => detState, hitTest, toPage, computeEstimate, geo, fmtFtIn, qtyFor, flush, setTool, SCALES };
+const UI_KEY = 'dt-ui-v1';
+const UI = (() => { try { return JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch { return {}; } })();
+if (UI.sideMin === undefined && innerWidth < 800) UI.sideMin = true;
+window.DT = { S, UI, applyT, setSelection, selMarks, copySel, pasteClip, duplicateSel, deleteSelected, combineCounts, selectAllPage, fxEval, pickerMode, fitPage, toScreen, detInfo: () => detState, hitTest, toPage, computeEstimate, geo, fmtFtIn, qtyFor, flush, setTool, SCALES };
 
 if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => { reg.update().catch(() => { }); document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => { }); }); }).catch(() => { });
   let reloaded = false; const hadCtrl = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange', () => { if (!hadCtrl || reloaded || S.drawing) return; reloaded = true; flush().then(() => location.reload()); });
 }
+
+/* ======================= v1.4: selection bar, multi-select, resizable / minimizable panels ======================= */
+$$('#selBar [data-sa]').forEach(b => b.onclick = () => ({ copy: copySel, paste: pasteClip, dup: duplicateSel, combine: combineCounts, del: deleteSelected, clear: () => { S.selId = null; renderOverlay(); refreshPanel(); } })[b.dataset.sa]());
+$('#btnMulti').onclick = () => { S.multi = !S.multi; if (S.multi && S.tool !== 'select') setTool('select'); refreshSelBar(); toast(S.multi ? 'Multi-select on: tap items to add or remove them' : 'Multi-select off'); };
+$('#btnSelAll').onclick = selectAllPage; $('#btnPaste').onclick = pasteClip;
+
+const saveUI = () => { try { localStorage.setItem(UI_KEY, JSON.stringify(UI)); } catch { } };
+function applyUI() {
+  const body = $('#plansBody'), side = $('#sidebar'), panel = $('#panel');
+  body.classList.toggle('swapped', !!UI.swap);
+  side.style.width = UI.sideW ? UI.sideW + 'px' : ''; panel.style.width = UI.panelW ? UI.panelW + 'px' : '';
+  side.classList.toggle('min', !!UI.sideMin); panel.classList.toggle('min', !!UI.panelMin);
+  $('#splitSide').classList.toggle('min', !!UI.sideMin); $('#splitPanel').classList.toggle('min', !!UI.panelMin);
+  setTimeout(() => S.page && scheduleDetail(), 60);
+}
+$('#togglePanel').onclick = () => { UI.panelMin = !UI.panelMin; saveUI(); applyUI(); };
+$('#toggleSide').onclick = () => { UI.sideMin = !UI.sideMin; saveUI(); applyUI(); };
+$('#btnSwap').onclick = () => { UI.swap = !UI.swap; saveUI(); applyUI(); };
+$$('[data-min]').forEach(b => b.onclick = () => { UI[b.dataset.min === 'side' ? 'sideMin' : 'panelMin'] = true; saveUI(); applyUI(); });
+$$('[data-restore]').forEach(b => b.onclick = () => { UI[b.dataset.restore === 'side' ? 'sideMin' : 'panelMin'] = false; saveUI(); applyUI(); });
+$$('.split').forEach(sp => {
+  sp.addEventListener('pointerdown', e => {
+    const which = sp.dataset.split, el = which === 'side' ? $('#sidebar') : $('#panel'), body = $('#plansBody');
+    if (el.classList.contains('min')) return;
+    e.preventDefault(); sp.setPointerCapture(e.pointerId); sp.classList.add('drag');
+    const mv = ev => {
+      const br = body.getBoundingClientRect(), vr = $('#viewer').getBoundingClientRect(), onLeft = el.getBoundingClientRect().left < vr.left;
+      const w = clamp(Math.round(onLeft ? ev.clientX - br.left : br.right - ev.clientX), 120, Math.min(640, br.width - 260));
+      el.style.width = w + 'px'; UI[which === 'side' ? 'sideW' : 'panelW'] = w;
+    };
+    const up = () => { sp.classList.remove('drag'); sp.removeEventListener('pointermove', mv); sp.removeEventListener('pointerup', up); sp.removeEventListener('pointercancel', up); saveUI(); S.page && scheduleDetail(); };
+    sp.addEventListener('pointermove', mv); sp.addEventListener('pointerup', up); sp.addEventListener('pointercancel', up);
+  });
+  sp.addEventListener('dblclick', () => { const k = sp.dataset.split === 'side' ? 'sideW' : 'panelW'; delete UI[k]; saveUI(); applyUI(); });   // double-click = reset width
+});
+applyUI();
 
 /* ======================= VOICE ESTIMATOR (v1.1) ======================= */
 // Parsing + matching run locally (voice.js). Speech-to-text is the browser's own Web Speech service.

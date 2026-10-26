@@ -34,8 +34,12 @@
         <button class="tool" data-tool="area" title="Area (A)"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 5h12v10H8L4 11z" fill="currentColor" fill-opacity=".25"/></svg> <span>Area</span></button>
         <button class="tool" data-tool="count" title="Count (C)"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><circle cx="6" cy="7" r="2.2" fill="currentColor"/><circle cx="14" cy="7" r="2.2" fill="currentColor"/><circle cx="10" cy="14" r="2.2" fill="currentColor"/></svg> <span>Count</span></button>
       </div>
+      <div class="grp" id="prodGroup">
+        <label id="prodLabel" for="activeProduct">Draw with:</label>
+        <select id="activeProduct" title="The one product box: sets the product for new markups, or for the selected markups"></select>
+      </div>
       <div class="grp">
-        <select id="activeProduct" title="Product for new markups"></select>
+        <button id="btnMulti" title="Multi-select: tap items to add or remove them (same as holding Shift). Shift+drag on empty space draws a selection box.">☑ Multi</button>
       </div>
       <div class="grp">
         <button id="btnFinish" class="accent" disabled title="Finish (Enter / double-click)">✓ Finish</button>
@@ -49,11 +53,15 @@
         <button id="zoomOut" title="Zoom out">−</button>
         <button id="zoomFit" title="Fit page"><span id="zoomLabel">100%</span></button>
         <button id="zoomIn" title="Zoom in">+</button>
-        <button id="togglePanel" title="Show/hide markups panel">☰</button>
+        <button id="btnSwap" title="Swap the Pages and Markups panels left/right">⇄</button>
+        <button id="toggleSide" title="Show/hide the pages panel">▤</button>
+        <button id="togglePanel" title="Show/hide the markups panel">☰</button>
       </div>
     </div>
     <div id="plansBody">
       <aside id="sidebar">
+        <button class="railBtn" data-restore="side" title="Show pages panel">▤</button>
+        <div class="panelBar"><span>Pages</span><button class="pbtn" data-min="side" title="Minimize this panel">⟨</button></div>
         <div class="sideHead">
           <select id="docSelect" title="PDF in this project"></select>
           <button id="btnAddPdf" class="accent small" title="Add PDF">+ PDF</button>
@@ -63,11 +71,22 @@
           <button id="btnRemovePdf" class="small danger" title="Remove this PDF from the project">Remove PDF</button>
         </div>
       </aside>
+      <div class="split" id="splitSide" data-split="side" title="Drag to resize"></div>
       <div id="viewer">
         <div id="stage"><canvas id="baseCanvas"></canvas></div>
         <canvas id="detailCanvas"></canvas>
         <svg id="overlay" xmlns="http://www.w3.org/2000/svg"><g id="world"></g></svg>
         <div id="hint" class="hint"></div>
+        <div id="marquee" class="hidden"></div>
+        <div id="selBar" class="hidden">
+          <b id="selN"></b>
+          <button data-sa="copy" title="Copy (Ctrl+C)">Copy</button>
+          <button data-sa="paste" title="Paste (Ctrl+V)">Paste</button>
+          <button data-sa="dup" title="Duplicate (Ctrl+D)">Duplicate</button>
+          <button data-sa="combine" title="Merge the selected counts into one">Combine counts</button>
+          <button data-sa="del" class="danger" title="Delete (Del)">Delete</button>
+          <button data-sa="clear" title="Deselect (Esc)">✕</button>
+        </div>
         <div id="empty" class="empty">
           <h2>Open a PDF plan to start</h2>
           <p>Your plans stay on this device. Nothing is uploaded.</p>
@@ -77,14 +96,18 @@
           <button id="prevPage">‹</button><span id="pageLabel">–</span><button id="nextPage">›</button>
         </div>
       </div>
+      <div class="split" id="splitPanel" data-split="panel" title="Drag to resize"></div>
       <aside id="panel">
+        <button class="railBtn" data-restore="panel" title="Show markups panel">☰</button>
+        <div class="panelBar"><span>Markups</span><button class="pbtn" data-min="panel" title="Minimize this panel">⟩</button></div>
         <div id="selBox" class="box hidden"></div>
         <div class="box">
-          <div class="boxHead">This page <span class="muted small" id="pageCount"></span></div>
+          <div class="boxHead">Page totals <span class="muted small">quantities by product, this page only</span></div>
           <div id="pageTotals"></div>
         </div>
         <div class="box grow">
-          <div class="boxHead">Markups on this page</div>
+          <div class="boxHead">Markups on this page <span class="muted small" id="pageCount"></span>
+            <span class="boxActs"><button class="small" id="btnSelAll" title="Select every markup on this page (Ctrl+A)">Select all</button><button class="small" id="btnPaste" title="Paste copied markups (Ctrl+V)">Paste</button></span></div>
           <div id="markupList"></div>
         </div>
       </aside>
@@ -100,6 +123,7 @@
           <label class="toggle" title="Show or hide all pricing for this project"><input type="checkbox" id="togPrices"> Show prices <span id="togPricesHint" class="muted small"></span></label>
           <button id="btnVoice" class="accent" title="Say or type items to add">🎤 Voice estimate</button>
           <button id="btnAddManual">+ Manual line</button>
+          <button id="btnFxHelp" title="How to write quantity formulas">ƒx Formulas</button>
           <button id="btnExportCsv">Export CSV</button>
           <button id="btnExportXlsx" class="accent">Export Excel (.xlsx)</button>
           <button id="btnPrint">Print summary</button>
@@ -124,7 +148,7 @@
         </div>
       </div>
       <div class="tableWrap"><table id="prodTable" class="grid"></table></div>
-      <p class="muted small">CSV columns: name, category, unit, unit_price, labor_price, waste_pct, color, multiplier. Multiplier converts what you measure into the product's unit (for example 0.03125 turns SF into 4×8 sheets).</p>
+      <p class="muted small">CSV columns: name, category, unit, unit_price, labor_price, waste_pct, color, multiplier, formula. Multiplier converts what you measure into the product's unit (for example 0.03125 turns SF into 4×8 sheets).</p>
     </div>
   </section>
 
