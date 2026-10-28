@@ -3,7 +3,7 @@ import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.5';
+const VER = 'v1.5.1';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -949,11 +949,11 @@ function printSummary() {
 /* ======================= PRODUCTS ======================= */
 function renderProducts() {
   const q = $('#prodSearch').value.trim().toLowerCase();
-  const ps = [...S.products].filter(p => !q || (p.name + ' ' + p.category).toLowerCase().includes(q)).sort((a, b) => (a.category || '').localeCompare(b.category || '') || a.name.localeCompare(b.name));
+  const ps = [...S.products].filter(p => !q || (p.name + ' ' + p.category).toLowerCase().includes(q)).sort((a, b) => (a.category || '').trim().localeCompare((b.category || '').trim()) || a.name.localeCompare(b.name));
   const used = {}; if (S.project) for (const m of S.project.markups) if (m.productId) used[m.productId] = (used[m.productId] || 0) + 1;
   $('#prodTable').innerHTML = `<tr><th></th><th>Name</th><th>Category</th><th>Unit</th><th class="n">Unit price</th><th class="n">Labor/unit</th><th class="n">Waste</th><th class="n">Multiplier</th><th>Formula</th><th class="n">In this project</th><th></th></tr>` +
-    (ps.map(p => `<tr data-id="${p.id}"><td><span class="sw" style="background:${p.color}"></span></td><td>${esc(p.name)}</td><td>${esc(p.category)}</td><td>${esc(p.unit)}</td><td class="n">${fmt$(num(p.price))}</td><td class="n">${fmt$(num(p.labor))}</td><td class="n">${fmtN(num(p.waste), 1)}%</td><td class="n">${p.mult && p.mult !== 1 ? p.mult : ''}</td><td class="small">${p.formula ? `<code title="${esc(fxProblem(p.formula) || 'Quantity formula')}">${fxProblem(p.formula) ? '⚠ ' : 'ƒx '}${esc(p.formula)}</code>` : ''}</td><td class="n">${used[p.id] || ''}</td>
-      <td class="n"><button class="small" data-act="use">Use</button> <button class="small" data-act="edit">Edit</button> <button class="small danger" data-act="del">✕</button></td></tr>`).join('') || `<tr><td colspan="11" class="muted">No products yet. Add one, or import a CSV.</td></tr>`);
+    (ps.map((p, i) => { const c = (p.category || '').trim(), pc = i ? (ps[i - 1].category || '').trim() : null; return (i === 0 || c !== pc ? `<tr class="cat"><td colspan="11">${esc(c || 'Uncategorized')}</td></tr>` : '') + `<tr data-id="${p.id}"><td><span class="sw" style="background:${p.color}"></span></td><td>${esc(p.name)}</td><td>${esc(p.category)}</td><td>${esc(p.unit)}</td><td class="n">${fmt$(num(p.price))}</td><td class="n">${fmt$(num(p.labor))}</td><td class="n">${fmtN(num(p.waste), 1)}%</td><td class="n">${p.mult && p.mult !== 1 ? p.mult : ''}</td><td class="small">${p.formula ? `<code title="${esc(fxProblem(p.formula) || 'Quantity formula')}">${fxProblem(p.formula) ? '⚠ ' : 'ƒx '}${esc(p.formula)}</code>` : ''}</td><td class="n">${used[p.id] || ''}</td>
+      <td class="n"><button class="small" data-act="use">Use</button> <button class="small" data-act="edit">Edit</button> <button class="small danger" data-act="del">✕</button></td></tr>`; }).join('') || `<tr><td colspan="11" class="muted">No products yet. Add one, or import a CSV.</td></tr>`);
   $$('#prodTable tr[data-id]').forEach(tr => tr.onclick = async e => {
     const act = e.target.closest('[data-act]')?.dataset.act, p = prodById(tr.dataset.id); if (!act) return;
     if (act === 'edit') productModal(p);
