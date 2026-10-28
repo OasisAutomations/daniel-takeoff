@@ -172,7 +172,12 @@ table.fx td{padding:3px 8px}
   #printArea th,#printArea td{border-bottom:1px solid #bbb;padding:4px 6px;text-align:left}
   #printArea .n{text-align:right}
   #printArea h1{font-size:18px;margin:0 0 4px}
-  #printArea .tot{margin-top:10px;margin-left:auto;width:320px}
+  #printArea .pcat{margin:0 0 14px}
+  #printArea .pch{font-size:14px;margin:12px 0 4px;padding:3px 6px;background:#e8e8e8;border-left:4px solid #000;break-after:avoid;page-break-after:avoid}
+  #printArea thead{display:table-header-group}
+  #printArea tr{break-inside:avoid;page-break-inside:avoid}
+  #printArea .subt td{font-weight:700;border-top:1px solid #000;border-bottom:none}
+  #printArea .tot{break-inside:avoid;margin-top:10px;margin-left:auto;width:320px}
   #printArea .tot div{display:flex;justify-content:space-between;padding:2px 0}
   #printArea .tot .g{font-weight:700;font-size:14px;border-top:1px solid #000;margin-top:4px;padding-top:4px}
 }
