@@ -3,7 +3,7 @@ import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.5.1';
+const VER = 'v1.5.2';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -923,7 +923,9 @@ async function exportXlsx() {
 }
 function printSummary() {
   const E = computeEstimate(); if (!E) return; const P = E.show;
-  // v1.5: one block per category (same grouping as the on-screen estimate), subtotal per category, grand total at the end
+  // v1.5: one block per category (same grouping as the on-screen estimate), grand total at the end
+  // v1.5.2: per-category subtotal rows are optional ("Category subtotals in print" toggle, off by default)
+  const SUBS = !!UI.printSubs;
   const groups = [], byKey = new Map();
   for (const l of E.all) {
     const key = l.kind === 'manual' ? '\u0000manual' : (l.category || '').trim(), label = l.kind === 'manual' ? 'Manual items' : (key || 'Uncategorized');
@@ -937,7 +939,7 @@ function printSummary() {
     const qtyTxt = [...byUnit].map(([u, q]) => fmtQty(q, u) + ' ' + u).join(' · ');   // units differ inside a category, so qty subtotals are per unit
     const rows = g.lines.map(l => `<tr><td>${esc(l.name)}</td><td>${esc(l.unit)}</td><td class="n">${fmtQty(l.qtyW, l.unit)}</td>${P ? `<td class="n">${m$(l.price)}</td><td class="n">${m$(l.mat)}</td><td class="n">${m$(l.labor)}</td><td class="n">${m$(l.total)}</td>` : ''}</tr>`).join('');
     const sub = `<tr class="subt"><td colspan="2">${esc(g.label)} subtotal</td><td class="n">${qtyTxt}</td>${P ? `<td class="n"></td><td class="n">${m$(mat)}</td><td class="n">${m$(lab)}</td><td class="n">${m$(tot)}</td>` : ''}</tr>`;
-    return `<section class="pcat"><h3 class="pch">${esc(g.label)}</h3><table>${head}<tbody>${rows}${sub}</tbody></table></section>`;
+    return `<section class="pcat"><h3 class="pch">${esc(g.label)}</h3><table>${head}<tbody>${rows}${SUBS ? sub : ''}</tbody></table></section>`;
   }).join('');
   $('#printArea').innerHTML = `<h1>${esc(S.project.name)} — ${P ? 'Estimate' : 'Quantities'}</h1><div>${new Date().toLocaleDateString()}</div><br>
     ${body || '<p>No items yet.</p>'}
@@ -1195,6 +1197,8 @@ $('#btnMulti').onclick = () => { S.multi = !S.multi; if (S.multi && S.tool !== '
 $('#btnSelAll').onclick = selectAllPage; $('#btnPaste').onclick = pasteClip;
 
 const saveUI = () => { try { localStorage.setItem(UI_KEY, JSON.stringify(UI)); } catch { } };
+$('#togPrintSubs').checked = !!UI.printSubs;
+$('#togPrintSubs').onchange = e => { UI.printSubs = e.target.checked; saveUI(); };
 function applyUI() {
   const body = $('#plansBody'), side = $('#sidebar'), panel = $('#panel');
   body.classList.toggle('swapped', !!UI.swap);
