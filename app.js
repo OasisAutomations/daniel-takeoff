@@ -3,7 +3,7 @@ import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.5.2';
+const VER = 'v1.5.3';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -921,6 +921,18 @@ async function exportXlsx() {
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet([['Done', 'Item', 'Notes'], ...S.project.checklist.map(c => [c.done ? 'Yes' : '', c.text, c.notes || ''])]), 'Checklist');
   X.writeFile(wb, `${safeName(S.project.name)}_estimate.xlsx`); toast('Excel file exported');
 }
+/* v1.5.3: "Save as PDF" uses document.title as the file name, so print as "<takeoff name> Hardware Takeoff" and put the app title back afterwards */
+const pdfTitle = s => String(s || '').replace(/[\/\\]+/g, '-').replace(/[:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').replace(/^[\s.-]+|[\s.]+$/g, '').slice(0, 120).trim();
+let printTitleTimer = 0, appTitle = null;
+function setPrintTitle() {
+  if (appTitle === null) appTitle = document.title;
+  const n = pdfTitle(S.project?.name);   // file name: "<takeoff name> Hardware Takeoff"
+  document.title = !n ? 'Hardware Takeoff' : /hardware takeoff$/i.test(n) ? n : n + ' Hardware Takeoff';
+  clearTimeout(printTitleTimer); printTitleTimer = setTimeout(restorePrintTitle, 60000);   // fallback if afterprint never fires
+}
+function restorePrintTitle() { clearTimeout(printTitleTimer); if (appTitle !== null) { document.title = appTitle; appTitle = null; } }
+addEventListener('beforeprint', () => { if (S.project) setPrintTitle(); });   // also covers the browser's own Print menu / Ctrl+P
+addEventListener('afterprint', () => setTimeout(restorePrintTitle, 500));
 function printSummary() {
   const E = computeEstimate(); if (!E) return; const P = E.show;
   // v1.5: one block per category (same grouping as the on-screen estimate), grand total at the end
@@ -945,7 +957,7 @@ function printSummary() {
     ${body || '<p>No items yet.</p>'}
     ${P ? `<div class="tot"><div><span>Material</span><span>${fmt$(E.mat)}</span></div><div><span>Labor</span><span>${fmt$(E.labor)}</span></div><div><span>Markup ${E.markupPct}%</span><span>${fmt$(E.markup)}</span></div><div><span>Tax ${E.taxPct}%</span><span>${fmt$(E.tax)}</span></div><div class="g"><span>Grand total</span><span>${fmt$(E.grand)}</span></div></div>` : ''}
     ${S.project.checklist.length ? `<h3>Checklist</h3><table>${S.project.checklist.map(c => `<tr><td>${c.done ? '☑' : '☐'} ${esc(c.text)}${c.notes ? `<br><small>${esc(c.notes)}</small>` : ''}</td></tr>`).join('')}</table>` : ''}`;
-  window.print();
+  setPrintTitle(); window.print();
 }
 
 /* ======================= PRODUCTS ======================= */
