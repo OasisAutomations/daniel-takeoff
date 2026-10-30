@@ -3,7 +3,7 @@ import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.5.3';
+const VER = 'v1.6.0';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -12,6 +12,25 @@ const num = (v, d = 0) => { const n = parseFloat(String(v ?? '').replace(/[$,%\s
 const COARSE = matchMedia('(pointer: coarse)').matches;
 const PALETTE = ['#1f8a7e', '#2f6fb3', '#b5642b', '#8a4fb0', '#b23a48', '#5d8a2f', '#c49a1c', '#3d7f99', '#7a5c3e', '#4e5ab8'];
 const TYPE_COLOR = { length: '#2f6fb3', area: '#1f8a7e', count: '#b5642b' };
+/* v1.6: quantity markups (length/area/count) vs. annotation markups (type 'note': highlight, pen, shapes, text, callout).
+   Notes never count toward quantities; both print on the marked-up drawing. Style fields are optional, so older saved
+   takeoffs load unchanged and just use the defaults below. */
+const QTY_TYPES = new Set(['length', 'area', 'count']);
+const isQty = m => QTY_TYPES.has(m.type);
+const ANN_KINDS = { highlight: 'Highlight', pen: 'Pen', line: 'Line', arrow: 'Arrow', rect: 'Rectangle', ellipse: 'Ellipse', cloud: 'Cloud', text: 'Text', callout: 'Callout' };
+const isAnnTool = t => Object.prototype.hasOwnProperty.call(ANN_KINDS, t);
+const SHAPE = { color: '#d1495b', width: 3, opacity: 1, dash: 'solid', fill: 'none', fillOpacity: 0.2 };
+const ANN_DEF = {
+  highlight: { color: '#ffd400', width: 14, opacity: 0.4, dash: 'solid' },
+  pen: { color: '#d1495b', width: 3, opacity: 1, dash: 'solid' },
+  line: { ...SHAPE }, arrow: { ...SHAPE }, rect: { ...SHAPE }, ellipse: { ...SHAPE }, cloud: { ...SHAPE },
+  text: { color: '#d1495b', fs: 18, opacity: 1, bg: '#ffffff', border: false, bold: true },
+  callout: { color: '#d1495b', width: 2.5, fs: 16, opacity: 1, bg: '#ffffff', bold: true, dash: 'solid' },
+};
+const QTY_DEF = { width: 2.6, dash: 'solid', opacity: 1, fill: 'solid', fillOpacity: 0.2, hatch: 'none', showLabel: true, showValue: true };
+const SWATCHES = ['#d1495b', '#ff7a00', '#ffd400', '#2fbf71', '#1f8a7e', '#2f6fb3', '#8a4fb0', '#111111', '#ffffff'];
+const HATCHES = { none: 'None', diag: 'Diagonal', back: 'Back diagonal', cross: 'Crosshatch', horiz: 'Horizontal', vert: 'Vertical', grid: 'Grid', dots: 'Dots' };
+const DASHES = { solid: 'Solid', dash: 'Dashed', dot: 'Dotted', dashdot: 'Dash-dot' };
 
 /* ---------- IndexedDB ---------- */
 const DB = {
@@ -320,6 +339,7 @@ function centroid(pts) {
   return [cx / (3 * A), cy / (3 * A)];
 }
 function geo(m) {
+  if (!isQty(m)) return { note: true };
   if (m.type === 'count') return { ea: m.pts.length };
   const k = S.project.scales[m.docId + ':' + m.page]?.ftPerPt; if (!k) return { noscale: true };
   if (m.type === 'length') { const lf = polyLen(m.pts) * k; return { lf, sf: m.height > 0 ? lf * m.height : null }; }
@@ -331,10 +351,12 @@ function fxVars(m, g, base, prod) {
   const per = m.type === 'count' ? 0 : (g.lf || 0), cnt = m.type === 'count' ? g.ea : 1;
   return { length: len, lf: len, area, sf: area, perimeter: per, count: cnt, ea: cnt, height: m.height > 0 ? m.height : 0, qty: base, mult: prod?.mult > 0 ? prod.mult : 1 };
 }
+const formulaOf = (m, prod) => String(m.formula || '').trim() || String(prod?.formula || '').trim();   // v1.6: a markup can override its product's formula
 function qtyFor(m, prod) {   // quantity in the product's unit
+  if (!isQty(m)) return null;
   const g = geo(m); if (g.noscale) return null;
-  const base = qtyDefault(m, g, prod);
-  if (prod && String(prod.formula || '').trim()) { try { return fxEval(prod.formula, fxVars(m, g, base, prod)); } catch { return base; } }
+  const base = qtyDefault(m, g, prod), f = prod ? formulaOf(m, prod) : '';
+  if (f) { try { return fxEval(f, fxVars(m, g, base, prod)); } catch { return base; } }
   return base;
 }
 function qtyDefault(m, g, prod) {
@@ -344,48 +366,148 @@ function qtyDefault(m, g, prod) {
   return (u === 'LF' ? g.lf : g.sf) * mult;
 }
 const nativeUnit = m => m.type === 'count' ? 'EA' : m.type === 'length' ? (m.height > 0 ? 'SF' : 'LF') : 'SF';
+const noteText = m => String(m.text || '').replace(/\s+/g, ' ').trim();
 function valueText(m) {
+  if (!isQty(m)) { const t = noteText(m); return t ? (t.length > 28 ? t.slice(0, 27) + '…' : t) : ''; }
   const g = geo(m); if (g.noscale) return 'set scale';
   if (m.type === 'count') return g.ea + ' EA';
   if (m.type === 'length') return fmtFtIn(g.lf) + (g.sf != null ? ` × ${fmtFtIn(m.height)} = ${fmtN(g.sf)} SF` : '');
   return fmtN(g.sf) + ' SF' + (S.project.settings.showPerim ? ` · P ${fmtFtIn(g.lf)}` : '');
 }
-const colorOf = m => prodById(m.productId)?.color || m.color || TYPE_COLOR[m.type];
-const markName = m => { const p = prodById(m.productId); return (p ? p.name : ({ length: 'Length', area: 'Area', count: 'Count' }[m.type])) + (m.label ? ' – ' + m.label : ''); };
+function styleOf(m) {   // effective look: defaults, then the product's style (like an OST condition), then this markup's own overrides
+  if (!isQty(m)) return { ...(ANN_DEF[m.kind] || SHAPE), ...(m.style || {}) };
+  const p = prodById(m.productId), s = { ...QTY_DEF, ...(p?.style || {}), ...(m.style || {}) };
+  s.color = m.style?.color || p?.color || m.color || TYPE_COLOR[m.type];
+  return s;
+}
+const colorOf = m => styleOf(m).color;
+const markName = m => { if (!isQty(m)) return ANN_KINDS[m.kind] || 'Markup'; const p = prodById(m.productId); return (p ? p.name : ({ length: 'Length', area: 'Area', count: 'Count' }[m.type])) + (m.label ? ' – ' + m.label : ''); };
 
 /* ---------- overlay ---------- */
+const pp = pts => pts.map(p => p[0] + ',' + p[1]).join(' ');
+const DASH = { dash: [4, 2.5], dot: [0.01, 2], dashdot: [5, 2, 0.01, 2] };
+const dashAttr = (d, w) => DASH[d] ? ` stroke-dasharray="${DASH[d].map(x => +(x * w).toFixed(3)).join(' ')}"` : '';
+function pill(x, y, s, col, anchor, z) {   // value labels: dark pills with big bold white text, always screen-sized
+  const fs = 15 / z, w = s.length * 0.62 * fs + 14 / z, hh = fs * 1.5, x0 = anchor === 'start' ? x : x - w / 2;
+  return `<rect x="${x0}" y="${y - hh / 2}" width="${w}" height="${hh}" rx="${6 / z}" fill="#0f151a" fill-opacity=".92" stroke="${col}" stroke-width="${1.8 / z}"/><text class="lbl" x="${x0 + 7 / z}" y="${y + 0.5 / z}" font-size="${fs}" text-anchor="start" dominant-baseline="middle">${esc(s)}</text>`;
+}
+function hatchDef(id, kind, color, z) {   // SVG pattern; spacing stays the same on screen at any zoom (and in print)
+  const s = 9 / z, w = 1.1 / z;
+  const body = kind === 'dots' ? `<circle cx="${s / 2}" cy="${s / 2}" r="${1.2 / z}" fill="${color}"/>`
+    : `<line x1="0" y1="${s / 2}" x2="${s}" y2="${s / 2}" stroke="${color}" stroke-width="${w}"/>` + (kind === 'cross' || kind === 'grid' ? `<line x1="${s / 2}" y1="0" x2="${s / 2}" y2="${s}" stroke="${color}" stroke-width="${w}"/>` : '');
+  const rot = { diag: -45, back: 45, cross: 45, vert: 90 }[kind] || 0;
+  return `<pattern id="${id}" patternUnits="userSpaceOnUse" width="${s}" height="${s}"${rot ? ` patternTransform="rotate(${rot})"` : ''}>${body}</pattern>`;
+}
+function pillText(m, st) { return [st.showLabel !== false && m.label ? m.label : '', st.showValue !== false ? valueText(m) : ''].filter(Boolean).join(' · '); }
+function qtySVG(m, z, sel, defs, pre) {
+  const st = styleOf(m), c = st.color, w = clamp(+st.width || QTY_DEF.width, 0.5, 30), sw = sel ? w + 1.4 : w, P = pp(m.pts), lab = pillText(m, st);
+  const da = dashAttr(st.dash, sw), NS = 'vector-effect="non-scaling-stroke"'; let h = '';
+  if (m.type === 'length') {
+    if (sel) h += `<polyline points="${P}" fill="none" stroke="#fff" stroke-width="${sw + 3}" ${NS} stroke-linejoin="round" opacity=".8"/>`;
+    h += `<polyline points="${P}" fill="none" stroke="${c}" stroke-width="${sw}" ${NS} stroke-linejoin="round" stroke-linecap="round"${da}/>`;
+    if (lab) { const e = m.pts[m.pts.length - 1]; h += pill(e[0] + 8 / z, e[1] - 10 / z, lab, c, 'start', z); }
+  } else if (m.type === 'area') {
+    if (st.fill !== 'none') h += `<polygon points="${P}" fill="${c}" fill-opacity="${st.fillOpacity}" stroke="none"/>`;
+    if (st.hatch && st.hatch !== 'none' && HATCHES[st.hatch]) { const id = pre + st.hatch + '-' + c.replace(/[^\w]/g, ''); if (!defs.has(id)) defs.set(id, hatchDef(id, st.hatch, c, z)); h += `<polygon points="${P}" fill="url(#${id})" stroke="none"/>`; }
+    if (sel) h += `<polygon points="${P}" fill="none" stroke="#fff" stroke-width="${sw + 3}" ${NS} stroke-linejoin="round"/>`;
+    h += `<polygon points="${P}" fill="none" stroke="${c}" stroke-width="${sw}" ${NS} stroke-linejoin="round"${da}/>`;
+    if (lab) { const [cx, cy] = centroid(m.pts); h += pill(cx, cy, lab, c, 'middle', z); }
+  } else {
+    const nd = String(m.pts.length).length, r = ((nd >= 3 ? 15 : nd === 2 ? 13 : 12) + (sel ? 2 : 0)) / z, nfs = (nd >= 3 ? 14 : 16) / z;
+    m.pts.forEach((p, i) => { h += `<circle cx="${p[0]}" cy="${p[1]}" r="${r}" fill="${c}" stroke="${sel ? '#ffd23f' : '#fff'}" stroke-width="${(sel ? 3 : 2) / z}"/><text class="cnum" x="${p[0]}" y="${p[1] + 0.5 / z}" font-size="${nfs}" stroke-width="${3.4 / z}" text-anchor="middle" dominant-baseline="central">${i + 1}</text>`; });
+    if (m.pts.length && lab) { const p = m.pts[m.pts.length - 1]; h += pill(p[0] + (r + 4 / z), p[1] - (r + 4 / z), lab, c, 'start', z); }
+  }
+  return `<g${st.opacity < 1 ? ` opacity="${st.opacity}"` : ''}>${h}</g>`;
+}
+/* ---- annotation geometry (page units: they scale with the sheet, like Bluebeam markups, and print the same) ---- */
+const box2 = pts => { const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]); return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) }; };
+const inBox = (q, b) => q[0] >= b.x0 && q[0] <= b.x1 && q[1] >= b.y0 && q[1] <= b.y1;
+const mctx = document.createElement('canvas').getContext('2d');
+function textLayout(m, st) {
+  const fs = clamp(+st.fs || 16, 2, 800), pad = fs * 0.35, lh = fs * 1.25, raw = String(m.text || ''), lines = (raw || ' ').split('\n');
+  mctx.font = `${st.bold ? 700 : 400} 100px system-ui, "Segoe UI", Arial, sans-serif`;
+  const tw = Math.max(...lines.map(l => mctx.measureText(l).width)) * fs / 100;
+  const a = m.kind === 'callout' ? m.pts[1] : m.pts[0];
+  return { x: a[0], y: a[1], w: Math.max(tw, fs * 2) + pad * 2, h: lines.length * lh + pad * 2, fs, pad, lh, lines, empty: !raw.trim() };
+}
+function bboxOf(m) {
+  if (m.type === 'note' && (m.kind === 'text' || m.kind === 'callout')) {
+    const t = textLayout(m, styleOf(m)); const b = { x0: t.x, y0: t.y, x1: t.x + t.w, y1: t.y + t.h };
+    if (m.kind === 'callout') { const p = m.pts[0]; b.x0 = Math.min(b.x0, p[0]); b.y0 = Math.min(b.y0, p[1]); b.x1 = Math.max(b.x1, p[0]); b.y1 = Math.max(b.y1, p[1]); }
+    return b;
+  }
+  return box2(m.pts);
+}
+function cloudPath(b) {   // revision cloud: outward bulging arcs around the box, traced clockwise
+  const W = b.x1 - b.x0, H = b.y1 - b.y0; if (W < 0.5 || H < 0.5) return `M${b.x0} ${b.y0}`;
+  const L = clamp(Math.min(W, H) / 4, 5, 40), C = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]]; let d = `M${b.x0} ${b.y0}`;
+  for (let i = 0; i < 4; i++) {
+    const a = C[i], e = C[(i + 1) % 4], len = dist(a, e), n = Math.max(1, Math.round(len / L)), r = len / n * 0.6;
+    for (let j = 1; j <= n; j++) d += ` A${r.toFixed(2)} ${r.toFixed(2)} 0 0 1 ${(a[0] + (e[0] - a[0]) * j / n).toFixed(2)} ${(a[1] + (e[1] - a[1]) * j / n).toFixed(2)}`;
+  }
+  return d + 'Z';
+}
+function arrowHead(a, b, w, z, c) {   // filled head at b, pointing from a to b; returns [svg, base point]
+  const L = Math.max(w * 4, 10 / z), d = dist(a, b) || 1, ux = (b[0] - a[0]) / d, uy = (b[1] - a[1]) / d, bx = b[0] - ux * L, by = b[1] - uy * L, hw = L * 0.42;
+  return [`<polygon points="${b[0]},${b[1]} ${bx - uy * hw},${by + ux * hw} ${bx + uy * hw},${by - ux * hw}" fill="${c}" stroke="none"/>`, [bx, by]];
+}
+function textSVG(m, st, framed) {
+  const t = textLayout(m, st), c = st.color; let h = '';
+  if ((st.bg && st.bg !== 'none') || framed || st.border) h += `<rect x="${t.x}" y="${t.y}" width="${t.w}" height="${t.h}" rx="${t.fs * 0.15}" fill="${st.bg && st.bg !== 'none' ? st.bg : 'none'}"${framed || st.border ? ` stroke="${c}" stroke-width="${Math.max(+st.width || 1.5, t.fs * 0.06)}"` : ''}/>`;
+  const lines = t.empty ? ['Text'] : t.lines;
+  h += `<text class="at" x="${t.x + t.pad}" y="${t.y + t.pad + t.fs * 0.92}" font-size="${t.fs}" fill="${c}"${t.empty ? ' fill-opacity=".45"' : ''} font-weight="${st.bold ? 700 : 400}">${lines.map((l, i) => `<tspan x="${t.x + t.pad}"${i ? ` dy="${t.lh}"` : ''}>${esc(l) || ' '}</tspan>`).join('')}</text>`;
+  return h;
+}
+function annSVG(m, z, sel) {
+  const st = styleOf(m), c = st.color, k = m.kind, p = m.pts; if (!p?.length) return '';
+  const w = Math.max(+st.width || 0, 1.2 / z), cap = k === 'highlight' ? 'butt' : 'round';
+  const stroke = `stroke="${c}" stroke-width="${w}" stroke-linejoin="round" stroke-linecap="${cap}"${dashAttr(st.dash, w)}`;
+  const fill = st.fill && st.fill !== 'none' ? `fill="${c}" fill-opacity="${st.fillOpacity ?? 0.2}"` : 'fill="none"';
+  let h = '';
+  if (k === 'highlight' || k === 'pen') h = p.length === 1 ? `<circle cx="${p[0][0]}" cy="${p[0][1]}" r="${w / 2}" fill="${c}"/>` : `<polyline points="${pp(p)}" fill="none" ${stroke}/>`;
+  else if (k === 'line') h = `<line x1="${p[0][0]}" y1="${p[0][1]}" x2="${p[1][0]}" y2="${p[1][1]}" ${stroke}/>`;
+  else if (k === 'arrow') { const [hd, bs] = arrowHead(p[0], p[1], w, z, c); h = `<line x1="${p[0][0]}" y1="${p[0][1]}" x2="${bs[0]}" y2="${bs[1]}" ${stroke}/>` + hd; }
+  else if (k === 'rect') { const b = box2(p); h = `<rect x="${b.x0}" y="${b.y0}" width="${b.x1 - b.x0}" height="${b.y1 - b.y0}" ${fill} ${stroke}/>`; }
+  else if (k === 'ellipse') { const b = box2(p); h = `<ellipse cx="${(b.x0 + b.x1) / 2}" cy="${(b.y0 + b.y1) / 2}" rx="${(b.x1 - b.x0) / 2}" ry="${(b.y1 - b.y0) / 2}" ${fill} ${stroke}/>`; }
+  else if (k === 'cloud') h = `<path d="${cloudPath(box2(p))}" ${fill} ${stroke}/>`;
+  else if (k === 'text') h = textSVG(m, st, false);
+  else if (k === 'callout') {
+    const t = textLayout(m, st), tip = p[0], e = [clamp(tip[0], t.x, t.x + t.w), clamp(tip[1], t.y, t.y + t.h)];
+    const [hd, bs] = arrowHead(e, tip, w, z, c);
+    if (dist(e, tip) > 1e-6) h += `<line x1="${e[0]}" y1="${e[1]}" x2="${bs[0]}" y2="${bs[1]}" ${stroke}/>` + hd;
+    h += textSVG(m, st, true);
+  }
+  let o = `<g${(st.opacity ?? 1) < 1 ? ` opacity="${st.opacity}"` : ''}>${h}</g>`;
+  if (sel) { const b = bboxOf(m), pd = 5 / z; o += `<rect x="${b.x0 - pd}" y="${b.y0 - pd}" width="${b.x1 - b.x0 + 2 * pd}" height="${b.y1 - b.y0 + 2 * pd}" fill="none" stroke="#ffd23f" stroke-width="${1.6 / z}" stroke-dasharray="${5 / z} ${3 / z}"/>`; }
+  return o;
+}
+function markupsSVG(ms, z, isSel, pre = 'h-') {
+  const defs = new Map(); let h = '';
+  for (const m of ms) h += isQty(m) ? qtySVG(m, z, isSel(m), defs, pre) : annSVG(m, z, isSel(m));
+  return (defs.size ? `<defs>${[...defs.values()].join('')}</defs>` : '') + h;
+}
+function handlesOf(m) {   // vertex handles (i) for lines/areas/arrows/callouts; corner resize handles for boxes, freehand and text
+  if (isQty(m)) return m.type === 'count' ? [] : m.pts.map((p, i) => ({ x: p[0], y: p[1], i }));
+  if (['line', 'arrow', 'callout'].includes(m.kind)) return m.pts.map((p, i) => ({ x: p[0], y: p[1], i }));
+  const b = bboxOf(m);
+  if (m.kind === 'text') return [{ x: b.x1, y: b.y1, corner: 2 }];
+  if (b.x1 - b.x0 < 1e-6 && b.y1 - b.y0 < 1e-6) return [];
+  return [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]].map(([x, y], corner) => ({ x, y, corner }));
+}
 function renderOverlay() {
   clearTimeout(ovT);
   if (!S.page || !S.project) { world.innerHTML = ''; return; }
   S.ovZ = S.z; world.setAttribute('transform', `translate(${S.tx} ${S.ty}) scale(${S.z})`);
-  const z = S.z; let h = '';
-  // value labels are dark pills with big bold white text: always screen-sized, readable at any zoom
-  const txt = (x, y, s, col, anchor = 'middle') => {
-    const fs = 15 / z, w = s.length * 0.62 * fs + 14 / z, hh = fs * 1.5, x0 = anchor === 'start' ? x : x - w / 2;
-    return `<rect x="${x0}" y="${y - hh / 2}" width="${w}" height="${hh}" rx="${6 / z}" fill="#0f151a" fill-opacity=".92" stroke="${col}" stroke-width="${1.8 / z}"/><text class="lbl" x="${x0 + 7 / z}" y="${y + 0.5 / z}" font-size="${fs}" text-anchor="start" dominant-baseline="middle">${esc(s)}</text>`;
-  };
-  for (const m of pageMarkups()) {
-    const c = colorOf(m), sel = S.sel.has(m.id) || m.id === S.countId, sw = sel ? 4 : 2.6, P = m.pts.map(p => p.join(',')).join(' ');
-    if (m.type === 'length') {
-      if (sel) h += `<polyline points="${P}" fill="none" stroke="#fff" stroke-width="${sw + 3}" vector-effect="non-scaling-stroke" stroke-linejoin="round" opacity=".8"/>`;
-      h += `<polyline points="${P}" fill="none" stroke="${c}" stroke-width="${sw}" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>`;
-      const e = m.pts[m.pts.length - 1]; h += txt(e[0] + 8 / z, e[1] - 10 / z, valueText(m), c, 'start');
-    } else if (m.type === 'area') {
-      h += `<polygon points="${P}" fill="${c}" fill-opacity=".2" stroke="${sel ? '#fff' : c}" stroke-width="${sel ? sw + 3 : sw}" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
-      if (sel) h += `<polygon points="${P}" fill="none" stroke="${c}" stroke-width="${sw}" vector-effect="non-scaling-stroke"/>`;
-      const [cx, cy] = centroid(m.pts); h += txt(cx, cy, valueText(m), c);
-    } else {
-      const nd = String(m.pts.length).length, r = ((nd >= 3 ? 15 : nd === 2 ? 13 : 12) + (sel ? 2 : 0)) / z, nfs = (nd >= 3 ? 14 : 16) / z;
-      m.pts.forEach((p, i) => { h += `<circle cx="${p[0]}" cy="${p[1]}" r="${r}" fill="${c}" stroke="${sel ? '#ffd23f' : '#fff'}" stroke-width="${(sel ? 3 : 2) / z}"/><text class="cnum" x="${p[0]}" y="${p[1] + 0.5 / z}" font-size="${nfs}" stroke-width="${3.4 / z}" text-anchor="middle" dominant-baseline="central">${i + 1}</text>`; });
-      if (m.pts.length) { const p = m.pts[m.pts.length - 1]; h += txt(p[0] + (r + 4 / z), p[1] - (r + 4 / z), `${m.pts.length} EA`, c, 'start'); }
-    }
-    if (m.id === S.selId && S.sel.size === 1 && m.type !== 'count') { const hs = 9 / z; for (const p of m.pts) h += `<rect x="${p[0] - hs / 2}" y="${p[1] - hs / 2}" width="${hs}" height="${hs}" fill="#fff" stroke="${c}" stroke-width="${1.8 / z}"/>`; }
-  }
+  const z = S.z, ms = pageMarkups(); let h = markupsSVG(ms, z, m => S.sel.has(m.id) || m.id === S.countId);
+  const pm = S.sel.size === 1 && ms.find(m => m.id === S.selId);
+  if (pm) { const c = colorOf(pm), hs = 9 / z; for (const q of handlesOf(pm)) h += q.corner != null ? `<rect data-h="c${q.corner}" x="${q.x - hs / 2}" y="${q.y - hs / 2}" width="${hs}" height="${hs}" fill="#2f6fb3" stroke="#fff" stroke-width="${1.6 / z}"/>` : `<rect data-h="v${q.i}" x="${q.x - hs / 2}" y="${q.y - hs / 2}" width="${hs}" height="${hs}" fill="#fff" stroke="${c}" stroke-width="${1.8 / z}"/>`; }
   world.innerHTML = h + '<g id="pv"></g>';
   renderPreview();
 }
 function renderPreview() {
-  const g = world.querySelector('#pv'); if (!g) return; const d = S.drawing; if (!d) { g.innerHTML = ''; return; }
+  const g = world.querySelector('#pv'); if (!g) return;
+  if (S.annPrev) { g.innerHTML = annSVG({ type: 'note', kind: S.annPrev.kind, pts: S.annPrev.pts, style: annToolStyle(S.annPrev.kind), text: '' }, S.z, false); return; }
+  const d = S.drawing; if (!d) { g.innerHTML = ''; return; }
   const z = S.z, pts = d.pts.slice(); if (S.hover && pts.length) pts.push(constrain(S.hover, d.shift));
   const c = d.type === 'calibrate' ? '#d1495b' : (prodById(S.activeProductId)?.color || TYPE_COLOR[d.type]);
   let h = '';
@@ -410,17 +532,27 @@ const HINTS = {
   area: 'Area: tap/click the corners. Tap the first point, double-tap, Enter or ✓ Finish to close.',
   count: 'Count: tap each item. ✓ Finish (or Enter) starts a new count group.',
   calibrate: 'Calibrate: tap both ends of a dimension you know.',
+  highlight: 'Highlighter: drag over the plan. Hold Shift for a straight stroke.',
+  pen: 'Pen: drag to draw freehand.',
+  line: 'Line: drag from start to end.',
+  arrow: 'Arrow: drag from the tail to the point.',
+  rect: 'Rectangle: drag corner to corner.',
+  ellipse: 'Ellipse: drag corner to corner.',
+  cloud: 'Revision cloud: drag corner to corner around the change.',
+  text: 'Text: tap where the text goes, then type. Tap an existing text to edit it.',
+  callout: 'Callout: drag from the point you are calling out to where the text goes, then type.',
   select: '',
 };
 function setTool(t) {
-  if (t !== 'calibrate' && t !== 'select' && t !== 'count' && !curScale() && S.page) { scaleModal(t); return; }
-  cancelDrawing(); S.tool = t;
+  if ((t === 'length' || t === 'area') && !curScale() && S.page) { S.scaleNext = t; setDockTab('scale'); toast('Set the scale for this page first'); return; }
+  closeTextEditor(); cancelDrawing(); if (t !== S.tool && isAnnTool(t) && S.sel.size) S.selId = null;   // v1.6: picking a tool starts fresh (Bluebeam-style); the tool's look shows in Properties
+  S.tool = t; if (t !== 'calibrate') S.calib = null;
   const ap = prodById(S.activeProductId), u = String(ap?.unit || '').toUpperCase();
-  if (ap && ((t === 'count' && (u === 'LF' || u === 'SF')) || ((t === 'length' || t === 'area') && u === 'EA'))) { S.activeProductId = ''; refreshActiveProduct(); toast(`${ap.name} is priced per ${u} — pick a product for this tool`); }
+  if (ap && QTY_TYPES.has(t) && ((t === 'count' && (u === 'LF' || u === 'SF')) || ((t === 'length' || t === 'area') && u === 'EA'))) { S.activeProductId = ''; refreshActiveProduct(); toast(`${ap.name} is priced per ${u} — pick a product for this tool`); }
   $$('.tool').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
   viewer.classList.toggle('drawing', t !== 'select');
   const h = $('#hint'); h.textContent = HINTS[t] || ''; h.classList.toggle('on', !!HINTS[t]);
-  updateFinish(); renderOverlay(); refreshActiveProduct();
+  updateFinish(); renderOverlay(); refreshActiveProduct(); renderDock();
 }
 function cancelDrawing() { S.drawing = null; S.countId = null; S.hover = null; updateFinish(); }
 function updateFinish() { $('#btnFinish').disabled = !((S.drawing && S.drawing.pts.length) || S.countId); }
@@ -470,7 +602,7 @@ function tap(sx, sy, e) {
     if (t === 'area' && d.pts.length >= 3 && dist(d.pts[0], p) * S.z < 12) { finishDrawing(); return; }
   }
   S.lastTap = now; d.pts.push(p); d.shift = e.shiftKey; updateFinish(); renderPreview();
-  if (t === 'calibrate' && d.pts.length === 2) { const dp = dist(d.pts[0], d.pts[1]); const pts = d.pts; S.drawing = null; renderPreview(); calibrateModal(dp, pts); }
+  if (t === 'calibrate' && d.pts.length === 2) { const dp = dist(d.pts[0], d.pts[1]); S.drawing = null; renderPreview(); S.calib = { dPts: dp }; setDockTab('scale'); setTimeout(() => $('#cFt')?.focus(), 30); }
 }
 const selMarks = () => pageMarkups().filter(m => S.sel.has(m.id));
 function setSelection(ids) { ids = [...ids]; S.sel = new Set(ids); S._pri = ids.length ? ids[ids.length - 1] : null; }
@@ -481,17 +613,29 @@ function hitTest(q) {
   const tol = 10 / S.z; let best = null, bd = Infinity;
   for (const m of pageMarkups()) {
     let d = Infinity;
-    if (m.type === 'count') for (const p of m.pts) d = Math.min(d, dist(p, q));
+    if (!isQty(m)) d = noteDist(m, q, tol);
+    else if (m.type === 'count') for (const p of m.pts) d = Math.min(d, dist(p, q));
     else { for (let i = 1; i < m.pts.length; i++) d = Math.min(d, segDist(q, m.pts[i - 1], m.pts[i])); if (m.type === 'area') { d = Math.min(d, segDist(q, m.pts[m.pts.length - 1], m.pts[0])); if (inPoly(q, m.pts)) d = Math.min(d, tol * 0.9); } }
     if (d < tol && d < bd) { bd = d; best = m; }
   }
   return best;
 }
+function noteDist(m, q, tol) {
+  const st = styleOf(m), hw = (+st.width || 0) / 2, p = m.pts;
+  const poly = (pts, closed) => { let d = Infinity; for (let i = 1; i < pts.length; i++) d = Math.min(d, segDist(q, pts[i - 1], pts[i])); if (closed) d = Math.min(d, segDist(q, pts[pts.length - 1], pts[0])); return pts.length === 1 ? dist(q, pts[0]) : d; };
+  if (m.kind === 'highlight' || m.kind === 'pen' || m.kind === 'line' || m.kind === 'arrow') return Math.max(0, poly(p) - hw);
+  if (m.kind === 'text') return inBox(q, bboxOf(m)) ? 0 : Infinity;
+  if (m.kind === 'callout') { const t = textLayout(m, st); return inBox(q, { x0: t.x, y0: t.y, x1: t.x + t.w, y1: t.y + t.h }) ? 0 : Math.max(0, segDist(q, p[0], [clamp(p[0][0], t.x, t.x + t.w), clamp(p[0][1], t.y, t.y + t.h)]) - hw); }
+  const b = box2(p), filled = st.fill && st.fill !== 'none';
+  if (m.kind === 'ellipse') { const rx = (b.x1 - b.x0) / 2 || 1e-6, ry = (b.y1 - b.y0) / 2 || 1e-6, r = Math.hypot((q[0] - b.x0 - rx) / rx, (q[1] - b.y0 - ry) / ry); return r <= 1 && filled ? 0 : Math.max(0, Math.abs(r - 1) * Math.min(rx, ry) - hw); }
+  if (filled && inBox(q, b)) return 0;
+  return Math.max(0, poly([[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]], true) - hw);
+}
 function hitHandle(q) {
   if (S.sel.size !== 1) return null;
   const m = S.project.markups.find(x => x.id === S.selId); if (!m || m.docId !== S.docId || m.page !== S.pageNum) return null;
   const tol = (COARSE ? 16 : 9) / S.z;
-  for (let i = 0; i < m.pts.length; i++) if (dist(m.pts[i], q) < tol) return { m, i };
+  for (const h of handlesOf(m)) if (dist([h.x, h.y], q) < tol) return { m, ...h };
   return null;
 }
 
@@ -499,13 +643,14 @@ function hitHandle(q) {
 const ptrs = new Map(); let G = null, spaceDown = false;
 const local = e => { const r = viewer.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
 viewer.addEventListener('pointerdown', e => {
-  if (!S.page || e.target.closest('#pageNav,#empty,#selBar')) return;
+  if (!S.page || e.target.closest('#pageNav,#empty,#selBar,#inlineText')) return;
   try { viewer.setPointerCapture(e.pointerId); } catch { }
   const p = local(e); ptrs.set(e.pointerId, p);
   if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; G = { type: 'pinch', d0: dist(a, b) || 1, m0: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], z0: S.z, tx0: S.tx, ty0: S.ty }; return; }
   if (ptrs.size > 2) return;
   if (e.button === 1 || e.button === 2 || spaceDown) { G = { type: 'pan', s: p, tx0: S.tx, ty0: S.ty }; viewer.classList.add('panning'); e.preventDefault(); return; }
-  if (S.tool === 'select' && S.selId) { const h = hitHandle(toPage(...p)); if (h) { pushUndo(); G = { type: 'vertex', ...h }; return; } }
+  if (S.tool === 'select' && S.selId) { const h = hitHandle(toPage(...p)); if (h) { pushUndo(); G = h.corner != null ? { type: 'scale', m: h.m, corner: h.corner, bb0: bboxOf(h.m), pts0: h.m.pts.map(q => q.slice()), fs0: styleOf(h.m).fs } : { type: 'vertex', m: h.m, i: h.i }; return; } }
+  if (isAnnTool(S.tool) && e.button === 0) { G = { type: 'ann', s: p, kind: S.tool, pts: [toPage(...p)] }; return; }
   G = { type: 'pending', s: p, tx0: S.tx, ty0: S.ty, thr: e.pointerType === 'touch' ? 10 : 5 };
   if (S.tool === 'select') {
     const add = e.shiftKey || e.ctrlKey || e.metaKey || S.multi, hit = hitTest(toPage(...p));
@@ -534,6 +679,19 @@ viewer.addEventListener('pointermove', e => {
   if (G?.type === 'pending' && dist(p, G.s) > G.thr) { G.type = 'pan'; viewer.classList.add('panning'); }
   if (G?.type === 'pan') { S.tx = G.tx0 + p[0] - G.s[0]; S.ty = G.ty0 + p[1] - G.s[1]; applyT(); return; }
   if (G?.type === 'vertex') { G.m.pts[G.i] = toPage(...p); G.moved = true; renderOverlay(); return; }
+  if (G?.type === 'scale') {
+    const q = toPage(...p), b = G.bb0, C = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]], mv = C[G.corner], fx = C[(G.corner + 2) % 4];
+    if (G.m.kind === 'text') { const s = Math.max(0.15, (q[1] - b.y0) / Math.max(1e-6, b.y1 - b.y0)); G.m.style = { ...(G.m.style || {}), fs: Math.round(clamp(G.fs0 * s, 4, 600) * 10) / 10 }; }
+    else { const sx = Math.abs(mv[0] - fx[0]) > 1e-6 ? (q[0] - fx[0]) / (mv[0] - fx[0]) : 1, sy = Math.abs(mv[1] - fx[1]) > 1e-6 ? (q[1] - fx[1]) / (mv[1] - fx[1]) : 1; G.m.pts = G.pts0.map(([x, y]) => [fx[0] + (x - fx[0]) * sx, fx[1] + (y - fx[1]) * sy]); }
+    G.moved = true; renderOverlay(); return;
+  }
+  if (G?.type === 'ann') {
+    const q = toPage(...p);
+    if (G.kind === 'pen' || (G.kind === 'highlight' && !e.shiftKey)) { const l = G.pts[G.pts.length - 1]; if (dist(l, q) * S.z > 2) G.pts.push(q); }
+    else G.pts = [G.pts[0], q];
+    if (dist(p, G.s) > 4) G.moved = true;
+    S.annPrev = { kind: G.kind, pts: G.pts }; renderPreview(); return;
+  }
   if (!G && S.drawing && e.pointerType !== 'touch') { S.hover = toPage(...p); S.drawing.shift = e.shiftKey; renderPreview(); }
 });
 function drawMarquee(a, b) {
@@ -543,10 +701,7 @@ function drawMarquee(a, b) {
 function hideMarquee() { $('#marquee').classList.add('hidden'); }
 function finishMarquee(a, b, add) {
   const [x1, y1] = toPage(Math.min(a[0], b[0]), Math.min(a[1], b[1])), [x2, y2] = toPage(Math.max(a[0], b[0]), Math.max(a[1], b[1]));
-  const ids = pageMarkups().filter(m => {
-    const xs = m.pts.map(q => q[0]), ys = m.pts.map(q => q[1]);
-    return Math.min(...xs) <= x2 && Math.max(...xs) >= x1 && Math.min(...ys) <= y2 && Math.max(...ys) >= y1;
-  }).map(m => m.id);
+  const ids = pageMarkups().filter(m => { const b = bboxOf(m); return b.x0 <= x2 && b.x1 >= x1 && b.y0 <= y2 && b.y1 >= y1; }).map(m => m.id);
   setSelection(add ? [...new Set([...S.sel, ...ids])] : ids);
   renderOverlay(); refreshPanel();
 }
@@ -556,7 +711,9 @@ function endPtr(e, cancel) {
   if (G.type === 'pinch') { if (ptrs.size === 0) G = null; return; }
   if (ptrs.size) return;
   const g = G; G = null;
-  if (cancel || !had) { if (g.type === 'marquee') hideMarquee(); if (g.type === 'move' && g.moved) { touch(); refreshPanel(); } return; }
+  if (cancel || !had) { if (g.type === 'marquee') hideMarquee(); if (g.type === 'ann') { S.annPrev = null; renderPreview(); } if ((g.type === 'move' || g.type === 'scale' || g.type === 'vertex') && g.moved) { touch(); refreshPanel(); } return; }
+  if (g.type === 'ann') { finishAnn(g); return; }
+  if (g.type === 'scale') { if (g.moved) { touch(); refreshPanel(); } else S.undo.pop(); return; }
   if (g.type === 'pending' || g.type === 'movecand') tap(...local(e), e);
   if (g.type === 'move') { if (g.moved) { touch(); refreshPanel(); } else S.undo.pop(); }
   if (g.type === 'marquee') { hideMarquee(); finishMarquee(g.s, g.cur || g.s, e.shiftKey || e.ctrlKey || e.metaKey); }
@@ -587,9 +744,10 @@ document.addEventListener('keydown', e => {
   if (S.view !== 'plans' || mod) return;
   if (k === ' ') { spaceDown = true; e.preventDefault(); }
   else if (k === 'enter') finishDrawing();
-  else if (k === 'escape') { if (S.drawing || S.countId) { cancelDrawing(); renderOverlay(); } else setTool('select'); }
+  else if (k === 'escape') { if (S.drawing || S.countId) { cancelDrawing(); renderOverlay(); } else if (S.sel.size && S.tool === 'select') { S.selId = null; renderOverlay(); refreshPanel(); } else setTool('select'); }
   else if (k === 'backspace' || k === 'delete') { if (S.drawing?.pts.length) undo(); else if (S.sel.size) deleteSelected(); e.preventDefault(); }
   else if (k === 'v') setTool('select'); else if (k === 'l') setTool('length'); else if (k === 'a') setTool('area'); else if (k === 'c') setTool('count');
+  else if (k === 'h') setTool('highlight'); else if (k === 'p') setTool('pen'); else if (k === 't') setTool('text'); else if (k === 'r') setTool('rect'); else if (k === 'e') setTool('ellipse'); else if (k === 'k') setTool('cloud'); else if (k === 'w') setTool('arrow');
   else if (k === 'f') fitPage(); else if (k === '+' || k === '=') zoomAt(1.25, viewer.clientWidth / 2, viewer.clientHeight / 2); else if (k === '-') zoomAt(0.8, viewer.clientWidth / 2, viewer.clientHeight / 2);
   else if (k === 'pagedown') gotoPage(1); else if (k === 'pageup') gotoPage(-1);
 });
@@ -607,37 +765,6 @@ function setScale(ftPerPt, label, allPages) {
   for (const k of keys) P.scales[k] = { ftPerPt, label };
   touch(); updateScaleLabel(); renderOverlay(); refreshPanel(); toast(`Scale set: ${label}${allPages ? ' (all pages)' : ''}`);
 }
-function scaleModal(nextTool) {
-  if (!S.page) return toast('Open a PDF first');
-  const cur = curScale(); const groups = [...new Set(SCALES.map(s => s.group))];
-  const opts = groups.map(g => `<optgroup label="${g}">${SCALES.filter(s => s.group === g).map(s => `<option value="${SCALES.indexOf(s)}" ${cur && Math.abs(cur.ftPerPt - s.ftPerPt) < 1e-12 ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</optgroup>`).join('');
-  openModal(`<h3>Scale for page ${S.pageNum}</h3>
-    <p class="muted small">Current: <b>${esc(cur?.label || 'not set')}</b>. Presets assume the PDF is at full sheet size (as issued).</p>
-    <div class="field"><label>Preset scale</label><select id="scSel">${cur ? '' : '<option value="">Choose a scale…</option>'}${opts}</select></div>
-    <label class="field row small"><input type="checkbox" id="scAll"> Apply to every page in this PDF</label>
-    <div class="btns"><button id="scMeasure">Calibrate from a known dimension…</button><button data-close>Cancel</button><button id="scOk" class="accent">Use preset</button></div>`, (m, close) => {
-    m.querySelector('#scOk').onclick = () => { const v = m.querySelector('#scSel').value; if (v === '') return toast('Pick a scale'); const s = SCALES[+v], all = m.querySelector('#scAll').checked; close(); setScale(s.ftPerPt, s.label, all); if (nextTool) setTool(nextTool); };
-    m.querySelector('#scMeasure').onclick = () => { S.calAll = m.querySelector('#scAll').checked; S.calNext = nextTool; close(); setTool('calibrate'); };
-  });
-}
-function calibrateModal(dPts, pts) {
-  const paperIn = dPts / 72;
-  openModal(`<h3>Calibrate</h3><p class="muted small">Measured ${fmtN(paperIn, 3)}" on the sheet. What is the real length?</p>
-    <form id="cf"><div class="ftin"><input id="cFt" inputmode="decimal" placeholder="feet" autofocus><span>ft</span><input id="cIn" placeholder='inches (e.g. 6 1/2)'><span>in</span></div>
-    <label class="field row small"><input type="checkbox" id="cAll" ${S.calAll ? 'checked' : ''}> Apply to every page in this PDF</label>
-    <div class="btns"><button type="button" data-close>Cancel</button><button class="accent">Set scale</button></div></form>`, (m, close) => {
-    m.querySelector('[data-close]').onclick = () => { close(); setTool('select'); };
-    m.querySelector('#cf').onsubmit = e => {
-      e.preventDefault(); const ft = num(m.querySelector('#cFt').value, 0), inch = parseInches(m.querySelector('#cIn').value);
-      const real = ft + (isFinite(inch) ? inch : 0) / 12; if (!(real > 0) || !isFinite(inch)) return toast('Enter the real length');
-      const k = real / dPts, near = nearPreset(k);
-      const label = near ? `${near} (calibrated)` : `1" = ${fmtFtIn(k * 72)} (calibrated)`;
-      const all = m.querySelector('#cAll').checked; close(); setScale(k, label, all);
-      const nt = S.calNext; S.calNext = null; setTool(nt || 'select');
-    };
-  });
-}
-
 /* ======================= SIDEBAR ======================= */
 function refreshDocSelect() {
   const sel = $('#docSelect'), docs = S.project?.docs || [];
@@ -681,13 +808,13 @@ function productOptions(selected, emptyLabel = '— No product —') {
   return `<option value="">${emptyLabel}</option>` + Object.entries(cats).map(([c, ps]) => `<optgroup label="${esc(c)}">${ps.map(p => `<option value="${p.id}" ${p.id === selected ? 'selected' : ''}>${esc(p.name)} (${esc(p.unit)})</option>`).join('')}</optgroup>`).join('');
 }
 // ONE product picker (top bar). With markups selected it sets THEIR product; otherwise it is the product the next markup is drawn with.
-function pickerMode() { return S.tool === 'select' && selMarks().length ? 'sel' : 'new'; }
+function pickerMode() { return S.tool === 'select' && selMarks().some(isQty) ? 'sel' : 'new'; }
 function refreshActiveProduct() {
   const sel = $('#activeProduct'), lab = $('#prodLabel'); if (S.activeProductId && !prodById(S.activeProductId)) S.activeProductId = '';
-  const mode = pickerMode(), picked = mode === 'sel' ? selMarks() : [];
+  const mode = pickerMode(), picked = mode === 'sel' ? selMarks().filter(isQty) : [];
   let val = S.activeProductId, mixed = false;
   if (mode === 'sel') { const ids = new Set(picked.map(m => m.productId || '')); if (ids.size === 1) val = [...ids][0]; else { mixed = true; val = '__mixed'; } }
-  sel.innerHTML = (mixed ? '<option value="__mixed" disabled>— Mixed products —</option>' : '') + productOptions(mixed ? '' : val, S.products.length ? '— No product —' : '— Add products in Products tab —');
+  sel.innerHTML = (mixed ? '<option value="__mixed" disabled>— Mixed products —</option>' : '') + productOptions(mixed ? '' : val, S.products.length ? '— No product —' : '— No products yet —') + '<option value="__new">＋ Add new product…</option>';
   sel.value = val; const p = mixed ? null : prodById(val);
   sel.style.borderColor = p ? p.color : '';
   lab.textContent = mode === 'sel' ? `Selected (${picked.length}):` : S.tool === 'select' ? 'Next markup:' : 'Draw with:';
@@ -698,55 +825,28 @@ function refreshActiveProduct() {
 /* ======================= RIGHT PANEL ======================= */
 function refreshPanel() {
   const list = $('#markupList'), tot = $('#pageTotals'), selBox = $('#selBox');
-  if (!S.project || !S.page) { list.innerHTML = '<p class="muted small">No page open.</p>'; tot.innerHTML = ''; selBox.classList.add('hidden'); $('#pageCount').textContent = ''; $('#selBar').classList.add('hidden'); return; }
+  if (!S.project || !S.page) { list.innerHTML = '<p class="muted small">No page open.</p>'; tot.innerHTML = ''; selBox.classList.add('hidden'); $('#pageCount').textContent = ''; $('#selBar').classList.add('hidden'); renderDock(); return; }
   const ms = pageMarkups(); $('#pageCount').textContent = ms.length ? `(${ms.length})` : '';
   for (const id of [...S.sel]) if (!ms.some(m => m.id === id)) S.sel.delete(id);
   if (S._pri && !S.sel.has(S._pri)) S._pri = [...S.sel].pop() || null;
   refreshSelBar(); refreshActiveProduct();
   $('#btnPaste').disabled = !S.clip;
-  list.innerHTML = ms.map(m => `<div class="mrow ${S.sel.has(m.id) ? 'on' : ''}" data-id="${m.id}"><span class="sw" style="background:${colorOf(m)}"></span><span class="mname">${esc(markName(m))}</span><span class="mval">${esc(valueText(m).split(' · ')[0])}</span></div>`).join('') || '<p class="muted small">Pick a tool above and tap on the plan.</p>';
+  list.innerHTML = ms.map(m => `<div class="mrow ${S.sel.has(m.id) ? 'on' : ''}" data-id="${m.id}"><span class="sw" style="background:${colorOf(m)}"></span><span class="mname">${isQty(m) ? '' : '✎ '}${esc(markName(m))}${m.label && isQty(m) ? ` <span class="muted">· ${esc(m.label)}</span>` : ''}</span><span class="mval">${esc(valueText(m).split(' · ')[0])}</span></div>`).join('') || '<p class="muted small">Pick a tool above and tap on the plan.</p>';
   list.querySelectorAll('.mrow').forEach(r => r.onclick = e => { if (S.tool !== 'select') setTool('select'); if (e.shiftKey || e.ctrlKey || e.metaKey || S.multi) toggleSel(r.dataset.id); else S.selId = r.dataset.id; renderOverlay(); refreshPanel(); });
-  // per-product totals for this page
+  // per-product totals for this page (annotations never count)
+  tot.innerHTML = pageAgg(ms).map(a => `<div class="trow"><span><span class="sw" style="display:inline-block;background:${a.color};margin-right:6px"></span>${esc(a.name)}</span><b>${fmtQty(a.q, a.unit)} ${esc(a.unit)}</b></div>`).join('') || '<p class="muted small">No quantities yet.</p>';
+  selBox.classList.add('hidden');   // v1.6: the selected markup is edited in the bottom dock, not in the side panel
+  renderDock();
+}
+function pageAgg(ms) {
   const agg = new Map();
   for (const m of ms) {
+    if (!isQty(m)) continue;
     const p = prodById(m.productId), key = p ? p.id : 'u-' + nativeUnit(m), q = p ? qtyFor(m, p) : (m.type === 'count' ? m.pts.length : (m.type === 'area' ? geo(m).sf : (geo(m).sf ?? geo(m).lf)));
     const a = agg.get(key) || { name: p ? p.name : 'Unassigned', unit: p ? p.unit : nativeUnit(m), color: p ? p.color : '#888', q: 0 };
     if (q != null) a.q += q; agg.set(key, a);
   }
-  tot.innerHTML = [...agg.values()].map(a => `<div class="trow"><span><span class="sw" style="display:inline-block;background:${a.color};margin-right:6px"></span>${esc(a.name)}</span><b>${fmtQty(a.q, a.unit)} ${esc(a.unit)}</b></div>`).join('') || '<p class="muted small">No quantities yet.</p>';
-  // selected markup
-  const picked = selMarks();
-  if (picked.length > 1) {
-    const types = { length: 0, area: 0, count: 0 }; picked.forEach(m => types[m.type]++);
-    const parts = Object.entries(types).filter(([, n]) => n).map(([t, n]) => `${n} ${t}${n > 1 && t !== 'count' ? 's' : ''}`).join(', ');
-    const nm = new Set(picked.map(m => m.productId || '')).size;
-    selBox.classList.remove('hidden');
-    selBox.innerHTML = `<div class="boxHead">${picked.length} selected<button class="small" id="sClose">✕</button></div>
-      <div class="small">${esc(parts)}</div>
-      <div class="muted small" style="margin-top:4px">Drag any selected item to move them all. Use the bar on the plan to copy, duplicate, combine counts or delete. Change the product with the Product box at the top.</div>
-      ${nm > 1 ? '<div class="muted small">They use different products.</div>' : ''}`;
-    selBox.querySelector('#sClose').onclick = () => { S.selId = null; renderOverlay(); refreshPanel(); };
-    return;
-  }
-  const m = picked[0];
-  if (!m) { selBox.classList.add('hidden'); return; }
-  selBox.classList.remove('hidden'); const g = geo(m), p = prodById(m.productId);
-  const q = p ? qtyFor(m, p) : null;
-  selBox.innerHTML = `<div class="boxHead">Selected ${m.type}<button class="small" id="sClose">✕</button></div>
-    <div class="big-val">${esc(valueText(m).split(' · ')[0])}</div>
-    ${m.type === 'area' && !g.noscale ? `<div class="muted small">Perimeter ${fmtFtIn(g.lf)} (${fmtN(g.lf)} LF)</div>` : ''}
-    ${m.type === 'length' && !g.noscale ? `<div class="muted small">${fmtN(g.lf)} LF</div>` : ''}
-    ${p && q != null ? `<div class="small">Counts as <b>${fmtQty(q, p.unit)} ${esc(p.unit)}</b> of ${esc(p.name)}</div>` : ''}
-    <div class="field"><label>Product</label><div class="roProd"><span class="sw" style="background:${colorOf(m)}"></span><b>${p ? esc(p.name) + ' (' + esc(p.unit) + ')' : 'No product'}</b><button class="small" id="sProdChange" title="Opens the Product box at the top">Change…</button></div></div>
-    <div class="field"><label>Note / label</label><input id="sLabel" value="${esc(m.label)}" placeholder="e.g. Kitchen north wall"></div>
-    ${m.type === 'length' ? `<div class="field"><label>Wall height in ft (optional, turns length into SF)</label><input id="sHeight" inputmode="decimal" value="${m.height || ''}" placeholder="e.g. 9"></div>` : ''}
-    <div class="actions" style="margin-top:8px">${m.type === 'count' ? '<button class="small" id="sAddCount">+ Add to this count</button>' : '<span class="muted small">Drag the white squares to edit points.</span>'}<button class="small danger" id="sDel" style="margin-left:auto">Delete</button></div>`;
-  selBox.querySelector('#sClose').onclick = () => { S.selId = null; renderOverlay(); refreshPanel(); };
-  selBox.querySelector('#sProdChange').onclick = () => { const s = $('#activeProduct'); s.scrollIntoView?.({ block: 'nearest' }); s.focus(); try { s.showPicker?.(); } catch { } };
-  selBox.querySelector('#sLabel').onchange = e => { pushUndo(); m.label = e.target.value.trim(); touch(); renderOverlay(); refreshPanel(); };
-  const hEl = selBox.querySelector('#sHeight'); if (hEl) hEl.onchange = e => { pushUndo(); const v = num(e.target.value, 0); m.height = v > 0 ? v : null; touch(); renderOverlay(); refreshPanel(); };
-  selBox.querySelector('#sDel').onclick = () => deleteMarkup(m.id);
-  const ac = selBox.querySelector('#sAddCount'); if (ac) ac.onclick = () => { setTool('count'); S.countId = m.id; S.selId = m.id; updateFinish(); renderOverlay(); toast('Tap to add more to this count'); };
+  return [...agg.values()];
 }
 /* ----- selection actions: copy / paste / duplicate / delete / combine counts ----- */
 const cloneM = m => JSON.parse(JSON.stringify(m));
@@ -806,6 +906,7 @@ function computeEstimate() {
   const P = S.project; if (!P) return null;
   const rows = new Map(), un = { LF: 0, SF: 0, EA: 0, n: 0 }; let noScale = 0;
   for (const m of P.markups) {
+    if (!isQty(m)) continue;   // v1.6: highlights, text, clouds… are drawing notes only
     const p = prodById(m.productId);
     if (!p) { const g = geo(m); if (g.noscale) { noScale++; continue; } un.n++; if (m.type === 'count') un.EA += g.ea; else if (m.type === 'area') un.SF += g.sf; else if (g.sf != null) un.SF += g.sf; else un.LF += g.lf; continue; }
     const q = qtyFor(m, p); if (q == null) { noScale++; continue; }
@@ -871,7 +972,7 @@ function renderEstimate() {
     $('#eMk').onchange = e => { S.project.settings.markupPct = num(e.target.value); touch(); renderEstimate(); };
     $('#eTx').onchange = e => { S.project.settings.taxPct = num(e.target.value); touch(); renderEstimate(); };
   }
-  $('#btnFxHelp').onclick = fxHelpModal;
+  $('#btnFxHelp').onclick = () => { const b = $('#fxHelpInline'); if (!b.innerHTML) b.innerHTML = FX_HELP; b.classList.toggle('hidden'); };
   $('#estNote').textContent = P ? 'Qty = measured × (1 + waste %). Material = qty × unit price. Labor = qty × labor per unit. Markup % applies to material + labor; tax % applies to material only. Blank price cells = not priced. A manual quantity can be a formula: start it with = (see ƒx Formulas).'
     : 'Prices are hidden (quantities only), on screen and in print and exports. Turn on "Show prices" to price this estimate.';
 }
@@ -905,6 +1006,7 @@ function loadXlsx() { return window.XLSX ? Promise.resolve() : new Promise((res,
 function markupRows() {
   const rows = [['PDF', 'Page', 'Type', 'Product', 'Note', 'Measured', 'Unit', 'Value']];
   for (const m of S.project.markups) {
+    if (!isQty(m)) continue;
     const p = prodById(m.productId), g = geo(m), doc = S.project.docs.find(d => d.id === m.docId);
     const q = p ? qtyFor(m, p) : (m.type === 'count' ? g.ea : m.type === 'area' ? g.sf : (g.sf ?? g.lf));
     rows.push([doc?.name || '', m.page, m.type, p?.name || '(unassigned)', m.label || '', q == null ? '' : r4(q), p ? p.unit : nativeUnit(m), valueText(m)]);
@@ -924,14 +1026,14 @@ async function exportXlsx() {
 /* v1.5.3: "Save as PDF" uses document.title as the file name, so print as "<takeoff name> Hardware Takeoff" and put the app title back afterwards */
 const pdfTitle = s => String(s || '').replace(/[\/\\]+/g, '-').replace(/[:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').replace(/^[\s.-]+|[\s.]+$/g, '').slice(0, 120).trim();
 let printTitleTimer = 0, appTitle = null;
-function setPrintTitle() {
+function setPrintTitle(suffix = '') {   // v1.6: the marked-up drawing prints as "<takeoff name> Hardware Takeoff - Drawing"
   if (appTitle === null) appTitle = document.title;
   const n = pdfTitle(S.project?.name);   // file name: "<takeoff name> Hardware Takeoff"
-  document.title = !n ? 'Hardware Takeoff' : /hardware takeoff$/i.test(n) ? n : n + ' Hardware Takeoff';
+  document.title = (!n ? 'Hardware Takeoff' : /hardware takeoff$/i.test(n) ? n : n + ' Hardware Takeoff') + suffix;
   clearTimeout(printTitleTimer); printTitleTimer = setTimeout(restorePrintTitle, 60000);   // fallback if afterprint never fires
 }
 function restorePrintTitle() { clearTimeout(printTitleTimer); if (appTitle !== null) { document.title = appTitle; appTitle = null; } }
-addEventListener('beforeprint', () => { if (S.project) setPrintTitle(); });   // also covers the browser's own Print menu / Ctrl+P
+addEventListener('beforeprint', () => { if (S.project) setPrintTitle($('#printArea').classList.contains('drawing') ? ' - Drawing' : ''); });   // also covers the browser's own Print menu / Ctrl+P
 addEventListener('afterprint', () => setTimeout(restorePrintTitle, 500));
 function printSummary() {
   const E = computeEstimate(); if (!E) return; const P = E.show;
@@ -953,6 +1055,7 @@ function printSummary() {
     const sub = `<tr class="subt"><td colspan="2">${esc(g.label)} subtotal</td><td class="n">${qtyTxt}</td>${P ? `<td class="n"></td><td class="n">${m$(mat)}</td><td class="n">${m$(lab)}</td><td class="n">${m$(tot)}</td>` : ''}</tr>`;
     return `<section class="pcat"><h3 class="pch">${esc(g.label)}</h3><table>${head}<tbody>${rows}${SUBS ? sub : ''}</tbody></table></section>`;
   }).join('');
+  setPrintMode('summary');
   $('#printArea').innerHTML = `<h1>${esc(S.project.name)} — ${P ? 'Estimate' : 'Quantities'}</h1><div>${new Date().toLocaleDateString()}</div><br>
     ${body || '<p>No items yet.</p>'}
     ${P ? `<div class="tot"><div><span>Material</span><span>${fmt$(E.mat)}</span></div><div><span>Labor</span><span>${fmt$(E.labor)}</span></div><div><span>Markup ${E.markupPct}%</span><span>${fmt$(E.markup)}</span></div><div><span>Tax ${E.taxPct}%</span><span>${fmt$(E.tax)}</span></div><div class="g"><span>Grand total</span><span>${fmt$(E.grand)}</span></div></div>` : ''}
@@ -967,10 +1070,19 @@ function renderProducts() {
   const used = {}; if (S.project) for (const m of S.project.markups) if (m.productId) used[m.productId] = (used[m.productId] || 0) + 1;
   $('#prodTable').innerHTML = `<tr><th></th><th>Name</th><th>Category</th><th>Unit</th><th class="n">Unit price</th><th class="n">Labor/unit</th><th class="n">Waste</th><th class="n">Multiplier</th><th>Formula</th><th class="n">In this project</th><th></th></tr>` +
     (ps.map((p, i) => { const c = (p.category || '').trim(), pc = i ? (ps[i - 1].category || '').trim() : null; return (i === 0 || c !== pc ? `<tr class="cat"><td colspan="11">${esc(c || 'Uncategorized')}</td></tr>` : '') + `<tr data-id="${p.id}"><td><span class="sw" style="background:${p.color}"></span></td><td>${esc(p.name)}</td><td>${esc(p.category)}</td><td>${esc(p.unit)}</td><td class="n">${fmt$(num(p.price))}</td><td class="n">${fmt$(num(p.labor))}</td><td class="n">${fmtN(num(p.waste), 1)}%</td><td class="n">${p.mult && p.mult !== 1 ? p.mult : ''}</td><td class="small">${p.formula ? `<code title="${esc(fxProblem(p.formula) || 'Quantity formula')}">${fxProblem(p.formula) ? '⚠ ' : 'ƒx '}${esc(p.formula)}</code>` : ''}</td><td class="n">${used[p.id] || ''}</td>
-      <td class="n"><button class="small" data-act="use">Use</button> <button class="small" data-act="edit">Edit</button> <button class="small danger" data-act="del">✕</button></td></tr>`; }).join('') || `<tr><td colspan="11" class="muted">No products yet. Add one, or import a CSV.</td></tr>`);
+      <td class="n"><button class="small" data-act="use">Use</button> <button class="small${S.prodEdit === p.id ? ' on' : ''}" data-act="edit">${S.prodEdit === p.id ? 'Close' : 'Edit'}</button> <button class="small danger" data-act="del">✕</button></td></tr>` + (S.prodEdit === p.id ? `<tr class="pedit" data-edit="${p.id}"><td colspan="11">${productFormHTML(p, { formula: true })}<div class="actions"><span class="muted small">Changes save as you go.</span><button class="small accent" data-pdone>Done</button></div></td></tr>` : ''); }).join('') || `<tr><td colspan="11" class="muted">No products yet. Add one, or import a CSV.</td></tr>`);
+  if (S.prodEdit === 'new') $('#prodTable tr').insertAdjacentHTML('afterend', `<tr class="pedit" data-edit="new"><td colspan="11"><b>New product</b>${productFormHTML(S.prodDraft, { formula: true })}<div class="actions"><button class="small" data-pcancel>Cancel</button><button class="small accent" data-padd>Add product</button></div></td></tr>`);
+  $$('#prodTable tr.pedit').forEach(tr => {
+    const id = tr.dataset.edit;
+    if (id === 'new') {
+      bindProductForm(tr, null);
+      tr.querySelector('[data-pcancel]').onclick = () => { S.prodEdit = null; renderProducts(); };
+      tr.querySelector('[data-padd]').onclick = async () => { const p = await createProduct(readPF(tr), tr); if (!p) return; S.prodEdit = null; refreshActiveProduct(); renderProducts(); toast(`Added ${p.name}`); };
+    } else { const p = prodById(id); bindProductForm(tr, p); tr.querySelector('[data-pdone]').onclick = () => { S.prodEdit = null; renderProducts(); }; }
+  });
   $$('#prodTable tr[data-id]').forEach(tr => tr.onclick = async e => {
     const act = e.target.closest('[data-act]')?.dataset.act, p = prodById(tr.dataset.id); if (!act) return;
-    if (act === 'edit') productModal(p);
+    if (act === 'edit') { S.prodEdit = S.prodEdit === p.id ? null : p.id; renderProducts(); $(`#prodTable tr.pedit [data-pf=name]`)?.focus(); }
     if (act === 'use') { S.selId = null; S.activeProductId = p.id; refreshActiveProduct(); switchView('plans'); autoToolFor(p); }
     if (act === 'del') {
       const n = used[p.id] || 0;
@@ -979,45 +1091,7 @@ function renderProducts() {
     }
   });
 }
-function productModal(p) {
-  const isNew = !p; p = p ? { ...p } : { id: uid(), name: '', category: '', unit: 'LF', price: 0, labor: 0, waste: 0, color: PALETTE[S.products.length % PALETTE.length], mult: 1 };
-  const cats = [...new Set(S.products.map(x => x.category).filter(Boolean))];
-  openModal(`<h3>${isNew ? 'New product' : 'Edit product'}</h3><form id="pf">
-    <div class="field"><label>Name</label><input id="pName" value="${esc(p.name)}" required autofocus></div>
-    <div class="grid2">
-      <div class="field"><label>Category</label><input id="pCat" list="catList" value="${esc(p.category)}"><datalist id="catList">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist></div>
-      <div class="field"><label>Unit (LF, SF, EA or your own)</label><input id="pUnit" list="unitList" value="${esc(p.unit)}"><datalist id="unitList">${['LF', 'SF', 'EA', 'SY', 'SHT', 'BOX', 'HR', 'SET'].map(u => `<option value="${u}">`).join('')}</datalist></div>
-      <div class="field"><label>Unit price ($)</label><input id="pPrice" inputmode="decimal" value="${p.price}"></div>
-      <div class="field"><label>Labor per unit ($, optional)</label><input id="pLabor" inputmode="decimal" value="${p.labor || 0}"></div>
-      <div class="field"><label>Waste %</label><input id="pWaste" inputmode="decimal" value="${p.waste || 0}"></div>
-      <div class="field"><label>Color</label><input id="pColor" type="color" value="${p.color}"></div>
-    </div>
-    <div class="field"><label>Multiplier (optional): converts what you measure into this unit. 1 = no change. Example: 0.03125 turns SF into 4×8 sheets.</label><input id="pMult" inputmode="decimal" value="${p.mult || 1}"></div>
-    <div class="field"><label>Quantity formula (optional) <button type="button" class="small" id="pFxHelp">ƒx Help</button></label>
-      <input id="pFormula" value="${esc(p.formula || '')}" placeholder="e.g. ceil(Area / 32)   or   Length * Height - Count * 21" spellcheck="false" autocapitalize="off" autocomplete="off">
-      <select id="pFxPreset" style="margin-top:4px"><option value="">Insert an example…</option>${FX_PRESETS.map(([n, f]) => `<option value="${esc(f)}">${esc(n)}  →  ${esc(f)}</option>`).join('')}</select>
-      <div class="small" id="pFxOut" style="margin-top:4px"></div><div id="pFxHelpBox" class="fxhelp hidden">${FX_HELP}</div></div>
-    <p class="muted small">Length markups count as LF (or wall SF when a wall height is set and the unit isn't LF). Area markups count as SF (or their perimeter if the unit is LF). Count markups count as EA.</p>
-    <div class="btns"><button type="button" data-close>Cancel</button><button class="accent">Save</button></div></form>`, (m, close) => {
-    const fxIn = m.querySelector('#pFormula'), fxOut = m.querySelector('#pFxOut');
-    const fxCheck = () => { const f = fxIn.value.trim(); if (!f) { fxOut.textContent = 'Blank: uses the measured quantity × multiplier.'; fxOut.className = 'small muted'; return true; } const er = fxProblem(f); fxOut.className = 'small ' + (er ? 'fxerr' : 'fxok'); fxOut.textContent = er ? '⚠ ' + er : `OK. Example: a 10 ft length / 100 SF area / 4 count (height 8) gives ${fmtN(fxEval(f, FX_SAMPLE), 3)}`; return !er; };
-    fxIn.oninput = fxCheck; fxCheck();
-    m.querySelector('#pFxPreset').onchange = e => { if (e.target.value) { fxIn.value = e.target.value; fxCheck(); } e.target.value = ''; };
-    m.querySelector('#pFxHelp').onclick = () => m.querySelector('#pFxHelpBox').classList.toggle('hidden');
-    m.querySelector('#pf').onsubmit = async e => {
-      e.preventDefault(); const v = id => m.querySelector(id).value;
-      if (!fxCheck()) return toast('Fix the quantity formula first (or clear it)');
-      Object.assign(p, { name: v('#pName').trim(), category: v('#pCat').trim(), unit: (v('#pUnit').trim() || 'EA').toUpperCase(), price: num(v('#pPrice')), labor: num(v('#pLabor')), waste: num(v('#pWaste')), color: v('#pColor'), mult: num(v('#pMult'), 1) || 1, formula: v('#pFormula').trim() });
-      if (!p.name) return toast('Name is required');
-      await saveProduct(p); const i = S.products.findIndex(x => x.id === p.id); if (i >= 0) S.products[i] = p; else S.products.push(p);
-      close(); refreshActiveProduct(); renderProducts(); renderOverlay(); refreshPanel(); toast('Product saved');
-    };
-  });
-}
 const fxProblem = f => { try { fxEval(f, FX_SAMPLE); return ''; } catch (e) { return e.message; } };
-function fxHelpModal() {
-  openModal(`<h3>ƒx Formulas</h3>${FX_HELP}<div class="btns"><button class="accent" data-close>Done</button></div>`, () => { });
-}
 function parseCSV(text) {
   const rows = []; let row = [], f = '', q = false;
   text = text.replace(/^\ufeff/, '');
@@ -1149,14 +1223,15 @@ $('#btnRemovePdf').onclick = removeCurrentPdf;
 $('#docSelect').onchange = async e => { if (e.target.value) { await showPage(e.target.value, 1); renderThumbs(); } };
 $('#activeProduct').onchange = e => {
   const v = e.target.value; if (v === '__mixed') return;
+  if (v === '__new') { refreshActiveProduct(); openNewProduct(); return; }
   if (pickerMode() === 'sel') {   // markups are selected: this box sets THEIR product
-    const ms = selMarks(); pushUndo(); for (const m of ms) { m.productId = v || null; m.color = v ? null : TYPE_COLOR[m.type]; }
+    const ms = selMarks().filter(isQty); pushUndo(); for (const m of ms) { m.productId = v || null; m.color = v ? null : TYPE_COLOR[m.type]; }
     touch(); renderOverlay(); refreshPanel(); markThumb(); toast(`${ms.length} markup${ms.length > 1 ? 's' : ''} → ${prodById(v)?.name || 'no product'}`); return;
   }
   S.activeProductId = v; S.countId = null; updateFinish(); refreshActiveProduct(); autoToolFor(prodById(S.activeProductId));
 };
 $('#btnFinish').onclick = finishDrawing; $('#btnUndo').onclick = undo; $('#btnRedo').onclick = redo;
-$('#btnScale').onclick = () => scaleModal(null);
+$('#btnScale').onclick = () => { if (!S.page) return toast('Open a PDF first'); S.calib = null; setDockTab('scale'); };
 $('#zoomIn').onclick = () => zoomAt(1.3, viewer.clientWidth / 2, viewer.clientHeight / 2);
 $('#zoomOut').onclick = () => zoomAt(1 / 1.3, viewer.clientWidth / 2, viewer.clientHeight / 2);
 $('#zoomFit').onclick = fitPage;
@@ -1164,7 +1239,7 @@ $('#prevPage').onclick = () => gotoPage(-1); $('#nextPage').onclick = () => goto
 $('#btnAddManual').onclick = () => { if (!S.project) return; S.project.manual.push({ id: uid(), desc: '', unit: 'EA', qty: 1, price: 0, labor: 0 }); touch(); renderEstimate(); const ins = $$('#estTable tr[data-mid] input[data-f=desc]'); ins[ins.length - 1]?.focus(); };
 $('#togPrices').onchange = e => setShowPrices(e.target.checked);
 $('#btnExportCsv').onclick = exportEstimateCsv; $('#btnExportXlsx').onclick = () => exportXlsx().catch(e => { console.warn(e); toast('Excel export failed — use CSV'); }); $('#btnPrint').onclick = printSummary;
-$('#btnAddProduct').onclick = () => productModal(null); $('#prodSearch').oninput = renderProducts;
+$('#btnAddProduct').onclick = () => { S.prodEdit = 'new'; S.prodDraft = blankProduct(); renderProducts(); $('#prodTable tr.pedit [data-pf=name]')?.focus(); }; $('#prodSearch').oninput = renderProducts;
 $('#btnImportCsv').onclick = () => $('#fileCsv').click(); $('#btnExportProducts').onclick = exportProductsCsv;
 $('#fileCsv').onchange = async e => { const f = e.target.files[0]; e.target.value = ''; if (f) await importProductsCsv(await f.text()); };
 $('#fileBackup').onchange = async e => { const f = e.target.files[0]; e.target.value = ''; if (f) await restoreBackup(f); };
@@ -1195,7 +1270,8 @@ start().catch(e => { console.error(e); toast('Startup error: ' + e.message, 6000
 const UI_KEY = 'dt-ui-v1';
 const UI = (() => { try { return JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch { return {}; } })();
 if (UI.sideMin === undefined && innerWidth < 800) UI.sideMin = true;
-window.DT = { S, UI, applyT, setSelection, selMarks, copySel, pasteClip, duplicateSel, deleteSelected, combineCounts, selectAllPage, fxEval, pickerMode, fitPage, toScreen, detInfo: () => detState, hitTest, toPage, computeEstimate, geo, fmtFtIn, qtyFor, flush, setTool, SCALES };
+if (UI.panelMin === undefined && innerWidth < 800) UI.panelMin = true;   // v1.6: on phones the bottom dock does the panel's job
+window.DT = { S, UI, applyT, setSelection, selMarks, copySel, pasteClip, duplicateSel, deleteSelected, combineCounts, selectAllPage, fxEval, pickerMode, fitPage, toScreen, detInfo: () => detState, hitTest, toPage, computeEstimate, geo, fmtFtIn, qtyFor, flush, setTool, SCALES, undo, redo, styleOf, bboxOf, setDockTab, printDrawing, renderOverlay, refreshPanel };
 
 if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => { reg.update().catch(() => { }); document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => { }); }); }).catch(() => { });
@@ -1339,3 +1415,411 @@ function voiceCommit() {
   return n;
 }
 $('#btnVoice').onclick = voiceModal;
+
+/* ======================= v1.6: annotation markups (Bluebeam-style markup toolbar) ======================= */
+const rr2 = v => Math.round(v * 100) / 100;
+const annToolStyle = k => ({ ...(ANN_DEF[k] || SHAPE), ...((UI.ann || {})[k] || {}) });
+function addNote(kind, pts, text = '') {
+  pushUndo();
+  const m = { id: uid(), type: 'note', kind, docId: S.docId, page: S.pageNum, pts: pts.map(p => [rr2(p[0]), rr2(p[1])]), text, style: annToolStyle(kind), label: '', created: Date.now() };
+  S.project.markups.push(m); S.selId = m.id;
+  touch(); renderOverlay(); refreshPanel(); markThumb(); return m;
+}
+function finishAnn(g) {
+  S.annPrev = null; const k = g.kind, q0 = g.pts[0];
+  if (k === 'text') {
+    const hit = hitTest(q0); if (hit && !isQty(hit) && (hit.kind === 'text' || hit.kind === 'callout')) { S.selId = hit.id; renderOverlay(); refreshPanel(); editTextInPlace(hit, false); return; }
+    editTextInPlace(addNote('text', [q0]), true); return;
+  }
+  if (k === 'callout') { const box = g.moved ? g.pts[g.pts.length - 1] : [q0[0] + 40 / S.z, q0[1] - 70 / S.z]; editTextInPlace(addNote('callout', [q0, box]), true); return; }
+  if (!g.moved) { renderPreview(); toast(`Drag on the plan to draw a ${ANN_KINDS[k].toLowerCase()}`); return; }
+  addNote(k, g.pts);
+}
+function editTextInPlace(m, isNew) {
+  closeTextEditor();
+  const st = styleOf(m), t = textLayout(m, st), ta = document.createElement('textarea');
+  ta.id = 'inlineText'; ta.value = m.text || ''; ta.placeholder = 'Type your text…'; ta.spellcheck = true;
+  Object.assign(ta.style, { left: (S.tx + t.x * S.z) + 'px', top: (S.ty + t.y * S.z) + 'px', fontSize: clamp(st.fs * S.z, 13, 64) + 'px', color: st.color, fontWeight: st.bold ? '700' : '400' });
+  viewer.appendChild(ta); S.editing = { m, isNew, ta };
+  const fit = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 2 + 'px'; };
+  ta.oninput = fit; fit(); setTimeout(() => ta.focus(), 0);
+  ta.onkeydown = e => { e.stopPropagation(); if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); ta.blur(); } };
+  ta.onblur = () => closeTextEditor();
+  ta.addEventListener('pointerdown', e => e.stopPropagation());
+}
+function closeTextEditor() {
+  const E = S.editing; if (!E) return; S.editing = null;
+  const v = E.ta.value.replace(/\s+$/, ''); E.ta.remove();
+  if (!v.trim()) { if (E.isNew) { S.project.markups = S.project.markups.filter(x => x.id !== E.m.id); S.undo.pop(); if (S.sel.has(E.m.id)) S.selId = null; } }
+  else if (v !== E.m.text) { if (!E.isNew) pushUndo(); E.m.text = v; }
+  touch(); renderOverlay(); refreshPanel(); markThumb();
+}
+viewer.addEventListener('dblclick', e => {
+  if (S.tool !== 'select' || !S.page) return;
+  const hit = hitTest(toPage(...local(e)));
+  if (hit && !isQty(hit) && (hit.kind === 'text' || hit.kind === 'callout')) { S.selId = hit.id; renderOverlay(); refreshPanel(); editTextInPlace(hit, false); }
+});
+
+/* ======================= v1.6: style controls (Bluebeam/OST conventions: color, line width, line style, fill, hatch, opacity) ======================= */
+const hex6 = c => /^#[0-9a-f]{6}$/i.test(c || '') ? c : '#000000';
+const STYLE_FIELDS = {
+  length: ['color', 'width', 'dash', 'opacity', 'show'],
+  area: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'hatch', 'opacity', 'show'],
+  count: ['color', 'opacity', 'show'],
+  highlight: ['color', 'width', 'opacity'],
+  pen: ['color', 'width', 'dash', 'opacity'], line: ['color', 'width', 'dash', 'opacity'], arrow: ['color', 'width', 'dash', 'opacity'],
+  rect: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'opacity'], ellipse: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'opacity'], cloud: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'opacity'],
+  text: ['color', 'fs', 'bold', 'bg', 'border', 'opacity'],
+  callout: ['color', 'width', 'fs', 'bold', 'bg', 'opacity'],
+};
+const fieldsFor = m => STYLE_FIELDS[isQty(m) ? m.type : m.kind] || [];
+function hatchIcon(k) {
+  const L = (x1, y1, x2, y2) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="currentColor" stroke-width="1.3"/>`;
+  const b = { none: '', diag: L(0, 6, 6, 0) + L(0, 12, 12, 0) + L(6, 12, 12, 6), back: L(0, 6, 6, 12) + L(0, 0, 12, 12) + L(6, 0, 12, 6), cross: L(0, 12, 12, 0) + L(0, 0, 12, 12), horiz: L(0, 3, 12, 3) + L(0, 7, 12, 7) + L(0, 11, 12, 11), vert: L(3, 0, 3, 12) + L(7, 0, 7, 12) + L(11, 0, 11, 12), grid: L(0, 4, 12, 4) + L(0, 8, 12, 8) + L(4, 0, 4, 12) + L(8, 0, 8, 12), dots: '<circle cx="3" cy="3" r="1.2" fill="currentColor"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="9" cy="3" r="1.2" fill="currentColor"/><circle cx="3" cy="9" r="1.2" fill="currentColor"/>' }[k];
+  return `<svg viewBox="0 0 12 12" width="18" height="18"><rect x=".5" y=".5" width="11" height="11" fill="none" stroke="currentColor" stroke-opacity=".5"/>${b}</svg>`;
+}
+function styleHTML(st, F, kind) {
+  const rng = (k, label, min, max, step, v, unit = '') => `<label class="sg"><span>${label} <output>${fmtStyle(k, v)}${unit}</output></span><input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${v}"></label>`;
+  let h = '<div class="stl">';
+  if (F.includes('color')) h += `<div class="sg wide"><span>Color</span><div class="sws">${SWATCHES.map(c => `<button type="button" class="swb${String(st.color).toLowerCase() === c ? ' on' : ''}" data-k="color" data-v="${c}" style="background:${c}" title="${c}" aria-label="Color ${c}"></button>`).join('')}<input type="color" data-k="color" value="${hex6(st.color)}" title="Custom color"></div></div>`;
+  if (F.includes('width')) h += rng('width', 'Line width', 0.5, kind === 'highlight' ? 48 : 16, 0.5, +st.width || 2, ' pt');
+  if (F.includes('dash')) h += `<label class="sg"><span>Line style</span><select data-k="dash">${Object.entries(DASHES).map(([k, n]) => `<option value="${k}" ${st.dash === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`;
+  if (F.includes('fill')) h += `<label class="sg"><span>Fill</span><select data-k="fill"><option value="none" ${st.fill === 'none' ? 'selected' : ''}>No fill</option><option value="solid" ${st.fill !== 'none' ? 'selected' : ''}>Color fill</option></select></label>`;
+  if (F.includes('fillOpacity')) h += rng('fillOpacity', 'Fill opacity', 0.05, 1, 0.05, st.fillOpacity ?? 0.2);
+  if (F.includes('hatch')) h += `<div class="sg wide"><span>Pattern (hatch)</span><div class="hts">${Object.entries(HATCHES).map(([k, n]) => `<button type="button" class="htb${(st.hatch || 'none') === k ? ' on' : ''}" data-k="hatch" data-v="${k}" title="${n}" aria-label="Hatch ${n}">${hatchIcon(k)}</button>`).join('')}</div></div>`;
+  if (F.includes('fs')) h += rng('fs', 'Font size', 4, 120, 1, +st.fs || 16, ' pt');
+  if (F.includes('bold')) h += `<label class="sg chk"><input type="checkbox" data-k="bold" ${st.bold ? 'checked' : ''}> Bold</label>`;
+  if (F.includes('bg')) h += `<label class="sg"><span>Background</span><select data-k="bg">${[['none', 'None'], ['#ffffff', 'White'], ['#fff7b0', 'Yellow'], ['#e8f1ff', 'Light blue']].map(([v, n]) => `<option value="${v}" ${st.bg === v ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`;
+  if (F.includes('border')) h += `<label class="sg chk"><input type="checkbox" data-k="border" ${st.border ? 'checked' : ''}> Border</label>`;
+  if (F.includes('opacity')) h += rng('opacity', 'Opacity', 0.1, 1, 0.05, st.opacity ?? 1);
+  if (F.includes('show')) h += `<div class="sg wide"><span>Show on drawing</span><label class="chk"><input type="checkbox" data-k="showLabel" ${st.showLabel !== false ? 'checked' : ''}> Label</label> <label class="chk"><input type="checkbox" data-k="showValue" ${st.showValue !== false ? 'checked' : ''}> Measurement</label></div>`;
+  return h + '</div>';
+}
+const fmtStyle = (k, v) => /opacity/i.test(k) ? Math.round(v * 100) + '%' : String(+(+v).toFixed(1));
+function bindStyle(root, set) {   // set(key, value, final)
+  root.querySelectorAll('[data-k]').forEach(el => {
+    const k = el.dataset.k;
+    const val = () => el.type === 'checkbox' ? el.checked : el.dataset.v ?? (el.type === 'range' ? parseFloat(el.value) : el.value);
+    if (el.tagName === 'BUTTON') { el.onclick = () => set(k, val(), true); return; }
+    el.oninput = () => { const o = el.parentElement.querySelector('output') || el.closest('.sg')?.querySelector('output'); if (o) o.textContent = fmtStyle(k, val()) + (k === 'width' || k === 'fs' ? ' pt' : ''); if (el.type === 'range' || el.type === 'color') set(k, val(), false); };
+    el.onchange = () => set(k, val(), true);
+  });
+}
+let styleUndo = false;
+function styleSetter(ms, scope) {   // scope 'product': change the product's look (all its markups, OST "condition" style); else these markups only
+  return (k, v, final) => {
+    if (scope === 'product') {
+      const prods = [...new Set(ms.map(m => prodById(m.productId)).filter(Boolean))];
+      if (!styleUndo) { pushUndo(); styleUndo = true; }
+      for (const p of prods) {
+        if (k === 'color') p.color = v; else p.style = { ...(p.style || {}), [k]: v };
+        for (const m of S.project.markups) if (m.productId === p.id && m.style && k in m.style) { delete m.style[k]; if (!Object.keys(m.style).length) delete m.style; }
+      }
+      renderOverlay();
+      if (final) { styleUndo = false; prods.forEach(saveProduct); touch(); refreshActiveProduct(); refreshPanel(); renderDock(true); }
+      return;
+    }
+    if (!styleUndo) { pushUndo(); styleUndo = true; }
+    for (const m of ms) m.style = { ...(m.style || {}), [k]: v };
+    renderOverlay();
+    if (final) { styleUndo = false; touch(); refreshPanel(); renderDock(true); }
+  };
+}
+
+/* ======================= v1.6: bottom dock (properties, formula, product, scale, print) ======================= */
+S.dockTab = ['props', 'fx', 'prod', 'scale', 'print'].includes(UI.dockTab) ? UI.dockTab : 'fx';
+S.styleScope = 'markup'; S.fxScope = 'product';
+let dockKey = '', dockLive = () => { };
+function setDockTab(t) {
+  if (t !== 'prod') S.dockNew = t === 'prod' ? S.dockNew : null;
+  S.dockTab = t; UI.dockTab = t; if (UI.dockMin) { UI.dockMin = false; applyDock(); } saveUI(); renderDock(true);
+}
+function applyDock() {
+  const d = $('#dock'); if (!d) return;
+  d.classList.toggle('min', !!UI.dockMin);
+  d.style.height = UI.dockMin ? '' : (UI.dockH || (innerWidth < 800 ? 220 : 250)) + 'px';
+  $('#dockMin').textContent = UI.dockMin ? '▴' : '▾'; $('#dockMin').title = UI.dockMin ? 'Open the bottom panel' : 'Minimize the bottom panel';
+  setTimeout(() => S.page && scheduleDetail(), 60);
+}
+function dockTarget() {   // the product the Formula / Product tabs work on: the selected markup's product, else the toolbar's product
+  const q = selMarks().filter(isQty), m = q.find(x => x.id === S._pri) || q[0];
+  if (m) return { m, p: prodById(m.productId) };
+  return { m: null, p: S.tool === 'select' || QTY_TYPES.has(S.tool) ? prodById(S.activeProductId) : prodById(S.activeProductId) };
+}
+function renderDock(force) {
+  const body = $('#dockBody'); if (!body) return;
+  $$('#dockTabs button').forEach(b => b.classList.toggle('on', b.dataset.dt === S.dockTab));
+  const key = [S.dockTab, [...S.sel].join(','), S.activeProductId, S.tool, S.dockNew ? 'n' : '', S.calib ? 'c' : '', S.project?.id, S.docId, S.pageNum, S.styleScope, S.fxScope].join('|');
+  if (!force && key === dockKey && body.contains(document.activeElement)) { dockLive(); return; }
+  dockKey = key; dockLive = () => { };
+  ({ props: dockProps, fx: dockFx, prod: dockProd, scale: dockScale, print: dockPrint })[S.dockTab](body);
+  const ms = selMarks(), ctx = $('#dockCtx');
+  ctx.textContent = ms.length > 1 ? `${ms.length} selected` : ms.length ? `Selected: ${markName(ms[0])}${ms[0].label ? ' · ' + ms[0].label : ''}` : isAnnTool(S.tool) ? `Tool: ${ANN_KINDS[S.tool]}` : prodById(S.activeProductId) ? `Next: ${prodById(S.activeProductId).name}` : '';
+}
+function dockProps(body) {
+  if (!S.project || !S.page) { body.innerHTML = '<p class="muted small">Open a PDF to start. Select a markup to edit its label, text and look here.</p>'; return; }
+  const ms = selMarks();
+  if (!ms.length) {
+    if (isAnnTool(S.tool)) {
+      const k = S.tool;
+      body.innerHTML = `<div class="dhead"><b>${ANN_KINDS[k]} tool</b><span class="muted small">How the next ${ANN_KINDS[k].toLowerCase()} looks (remembered on this device). ${esc(HINTS[k] || '')}</span><button class="small" id="annReset">Reset look</button></div>${styleHTML(annToolStyle(k), STYLE_FIELDS[k], k)}`;
+      bindStyle(body, (key, v, final) => { UI.ann = UI.ann || {}; UI.ann[k] = { ...(UI.ann[k] || {}), [key]: v }; saveUI(); if (final) renderDock(true); });
+      body.querySelector('#annReset').onclick = () => { if (UI.ann) delete UI.ann[k]; saveUI(); renderDock(true); };
+      return;
+    }
+    const p = prodById(S.activeProductId);
+    if (p) {
+      body.innerHTML = `<div class="dhead"><span class="sw" style="background:${p.color}"></span><b>${esc(p.name)}</b><span class="muted small">Look of every markup that uses this product (like a Bluebeam tool set / OST condition).</span></div>${styleHTML({ ...QTY_DEF, ...(p.style || {}), color: p.color }, ['color', 'width', 'dash', 'fill', 'fillOpacity', 'hatch', 'opacity', 'show'], 'area')}`;
+      bindStyle(body, (k, v, final) => { if (k === 'color') p.color = v; else p.style = { ...(p.style || {}), [k]: v }; renderOverlay(); if (final) { saveProduct(p); refreshActiveProduct(); refreshPanel(); renderDock(true); } });
+      return;
+    }
+    body.innerHTML = '<p class="muted small">Select a markup on the plan to edit its label, text and look here. Pick a markup tool (highlighter, pen, cloud, text…) to set how it draws.</p>'; return;
+  }
+  const m = ms[0], one = ms.length === 1, allQty = ms.every(isQty), hasProd = allQty && ms.some(x => prodById(x.productId));
+  const scope = hasProd ? S.styleScope : 'markup';
+  const kinds = new Set(ms.map(x => isQty(x) ? x.type : x.kind));
+  const F = kinds.size === 1 ? fieldsFor(m) : ['color', 'opacity'];
+  const st = styleOf(m);
+  let h = '<div class="dgrid"><div class="dcol">';
+  if (one && isQty(m)) {
+    const g = geo(m), p = prodById(m.productId), q = p ? qtyFor(m, p) : null;
+    h += `<div class="big-val">${esc(valueText(m).split(' · ')[0])}</div>
+      ${m.type === 'area' && !g.noscale ? `<div class="muted small">Perimeter ${fmtFtIn(g.lf)} (${fmtN(g.lf)} LF)</div>` : ''}
+      ${p && q != null ? `<div class="small">Counts as <b>${fmtQty(q, p.unit)} ${esc(p.unit)}</b> of ${esc(p.name)}</div>` : `<div class="small muted">${p ? '' : 'No product yet: pick one in the Product box at the top.'}</div>`}
+      <label class="field"><span>Label</span><input id="sLabel" value="${esc(m.label)}" placeholder="e.g. Kitchen north wall"></label>
+      ${m.type === 'length' ? `<label class="field"><span>Wall height ft (turns length into SF)</span><input id="sHeight" inputmode="decimal" value="${m.height || ''}" placeholder="e.g. 9"></label>` : ''}
+      <div class="actions">${m.type === 'count' ? '<button class="small" id="sAddCount">+ Add to this count</button>' : ''}<button class="small" data-goto="fx">ƒx Formula</button><button class="small danger" id="sDel">Delete</button></div>`;
+  } else if (one) {
+    h += `<div class="dhead"><b>${ANN_KINDS[m.kind]}</b><span class="muted small">Drawing note: prints on the drawing, never counts in quantities.</span></div>
+      ${m.kind === 'text' || m.kind === 'callout' ? `<label class="field"><span>Text</span><textarea id="sText" rows="2">${esc(m.text)}</textarea></label>` : ''}
+      <label class="field"><span>Label (shows in the markup list)</span><input id="sLabel" value="${esc(m.label)}" placeholder="optional"></label>
+      <div class="actions"><button class="small danger" id="sDel">Delete</button></div>`;
+  } else {
+    h += `<div class="dhead"><b>${ms.length} selected</b><span class="muted small">Style changes apply to all of them. Drag one to move them all.</span></div><div class="actions"><button class="small danger" id="sDel">Delete ${ms.length}</button></div>`;
+  }
+  h += `</div><div class="dcol grow">${hasProd ? `<div class="seg" role="group" aria-label="Apply style to"><button type="button" data-scope="markup" class="${scope === 'markup' ? 'on' : ''}">This markup</button><button type="button" data-scope="product" class="${scope === 'product' ? 'on' : ''}">Whole product</button></div>` : ''}${styleHTML(st, F, m.kind || m.type)}</div></div>`;
+  body.innerHTML = h;
+  bindStyle(body.querySelector('.dcol.grow'), styleSetter(ms, scope));
+  body.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { S.styleScope = b.dataset.scope; renderDock(true); });
+  body.querySelectorAll('[data-goto]').forEach(b => b.onclick = () => setDockTab(b.dataset.goto));
+  const lab = body.querySelector('#sLabel'); if (lab) lab.onchange = () => { pushUndo(); m.label = lab.value.trim(); touch(); renderOverlay(); refreshPanel(); };
+  const hEl = body.querySelector('#sHeight'); if (hEl) hEl.onchange = () => { pushUndo(); const v = num(hEl.value, 0); m.height = v > 0 ? v : null; touch(); renderOverlay(); refreshPanel(); renderDock(true); };
+  const tx = body.querySelector('#sText'); if (tx) { let u = false; tx.oninput = () => { if (!u) { pushUndo(); u = true; } m.text = tx.value; renderOverlay(); }; tx.onchange = () => { u = false; touch(); refreshPanel(); }; }
+  const del = body.querySelector('#sDel'); if (del) del.onclick = () => one ? deleteMarkup(m.id) : deleteSelected();
+  const ac = body.querySelector('#sAddCount'); if (ac) ac.onclick = () => { setTool('count'); S.countId = m.id; S.selId = m.id; updateFinish(); renderOverlay(); toast('Tap to add more to this count'); };
+}
+function fxRows(p) {   // every markup of this product in the project, current page first
+  const all = S.project.markups.filter(x => isQty(x) && x.productId === p.id);
+  all.sort((a, b) => ((b.docId === S.docId && b.page === S.pageNum) - (a.docId === S.docId && a.page === S.pageNum)) || a.page - b.page);
+  return all;
+}
+function dockFx(body) {
+  if (!S.project) { body.innerHTML = '<p class="muted small">Open a project first.</p>'; return; }
+  const { m, p } = dockTarget();
+  if (!p) { body.innerHTML = `<div class="dhead"><b>ƒx Formula</b><span class="muted small">Pick a product in the Product box at the top, or select a markup that has one, to see and edit its quantity formula here with live results.</span><button class="small" id="fxNew">＋ New product</button></div>`; body.querySelector('#fxNew').onclick = openNewProduct; return; }
+  const scope = m ? S.fxScope : 'product', f = scope === 'markup' ? (m.formula || '') : (p.formula || '');
+  body.innerHTML = `<div class="dgrid"><div class="dcol">
+    <div class="dhead"><span class="sw" style="background:${p.color}"></span><b>${esc(p.name)}</b> <span class="muted">(${esc(p.unit)})</span>
+      ${m ? `<div class="seg"><button type="button" data-fs="product" class="${scope === 'product' ? 'on' : ''}" title="Edit the product's formula: every markup of this product uses it">Product formula</button><button type="button" data-fs="markup" class="${scope === 'markup' ? 'on' : ''}" title="A formula just for the selected markup (overrides the product's)">This markup only</button></div>` : ''}</div>
+    <div class="fxRow"><span class="fxEq">ƒx =</span><input id="fxIn" class="mono" value="${esc(f)}" placeholder="${scope === 'markup' ? 'blank = use the product formula' : 'blank = measured × multiplier'}" spellcheck="false" autocapitalize="off" autocomplete="off"><button class="small" id="fxClear" title="Clear the formula">Clear</button></div>
+    <div class="fxRow"><select id="fxPreset"><option value="">Insert an example…</option>${FX_PRESETS.map(([n, fx]) => `<option value="${esc(fx)}">${esc(n)} → ${esc(fx)}</option>`).join('')}</select><button class="small" id="fxHelpT">Help</button></div>
+    <div id="fxMsg" class="small"></div>
+    <div id="fxVars" class="fxVars"></div>
+    <div id="fxHelpBox" class="fxhelp hidden">${FX_HELP}</div>
+  </div><div class="dcol grow"><div id="fxRes"></div></div></div>`;
+  const inp = body.querySelector('#fxIn'), msg = body.querySelector('#fxMsg');
+  const live = () => {
+    const rows = fxRows(p), sample = m || rows[0];
+    if (sample) { const g = geo(sample), base = g.noscale ? 0 : qtyDefault(sample, g, p), V = g.noscale ? null : fxVars(sample, g, base, p);
+      body.querySelector('#fxVars').innerHTML = V ? `<span class="muted small">${m ? 'Selected markup' : 'First markup'}:</span> ` + [['Length', V.length, 'LF'], ['Area', V.area, 'SF'], ['Perimeter', V.perimeter, 'LF'], ['Count', V.count, 'EA'], ['Height', V.height, 'ft'], ['Qty', V.qty, ''], ['Mult', V.mult, '']].map(([n, v, u]) => `<button type="button" class="chip" data-ins="${n}" title="Insert ${n}">${n} <b>${fmtN(v, 2)}</b>${u ? ' ' + u : ''}</button>`).join('') : '<span class="muted small">Set the scale to see measured values.</span>';
+      body.querySelectorAll('[data-ins]').forEach(b => b.onclick = () => { const s = inp.selectionStart ?? inp.value.length; inp.value = inp.value.slice(0, s) + b.dataset.ins + inp.value.slice(inp.selectionEnd ?? s); inp.focus(); inp.dispatchEvent(new Event('input')); });
+    } else body.querySelector('#fxVars').innerHTML = '<span class="muted small">No markups use this product yet. Draw one to see live results.</span>';
+    let tot = 0, n = 0, h = '';
+    rows.forEach((x, i) => { const q = qtyFor(x, p); if (q != null) tot += q; n++; if (i < 60) h += `<tr class="${S.sel.has(x.id) ? 'on' : ''}" data-mid="${x.id}"><td>${x.docId === S.docId && x.page === S.pageNum ? 'This page' : 'Pg ' + x.page}</td><td>${esc(x.label || markName(x))}${x.formula ? ' <span class="badge" title="Has its own formula">ƒx</span>' : ''}</td><td>${esc(valueText(x).split(' · ')[0])}</td><td class="n"><b>${fmtQty(q, p.unit)}</b></td></tr>`; });
+    const w = num(p.waste);
+    body.querySelector('#fxRes').innerHTML = `<table class="fxT"><thead><tr><th>Where</th><th>Markup</th><th>Measured</th><th class="n">Qty (${esc(p.unit)})</th></tr></thead><tbody>${h || '<tr><td colspan="4" class="muted">No markups yet</td></tr>'}</tbody>
+      <tfoot><tr><td colspan="3">Total · ${n} markup${n === 1 ? '' : 's'}${w ? ` · with ${fmtN(w, 1)}% waste ${fmtQty(tot * (1 + w / 100), p.unit)}` : ''}</td><td class="n"><b id="fxTotal">${fmtQty(tot, p.unit)}</b></td></tr></tfoot></table>`;
+    body.querySelectorAll('#fxRes tr[data-mid]').forEach(tr => tr.onclick = () => { const x = S.project.markups.find(y => y.id === tr.dataset.mid); if (!x) return; if (x.docId !== S.docId || x.page !== S.pageNum) showPage(x.docId, x.page).then(() => { S.selId = x.id; renderOverlay(); refreshPanel(); }); else { if (S.tool !== 'select') setTool('select'); S.selId = x.id; renderOverlay(); refreshPanel(); } });
+  };
+  dockLive = live;
+  let saveT = 0, undone = false;
+  const check = () => {
+    const v = inp.value.trim(), er = v ? fxProblem(v) : '';
+    msg.className = 'small ' + (er ? 'fxerr' : v ? 'fxok' : 'muted');
+    msg.textContent = er ? '⚠ ' + er + ' (not saved yet)' : v ? '✓ Saved · results update live' : (scope === 'markup' ? 'Using the product formula' + (p.formula ? `: ${p.formula}` : ' (none: measured × multiplier)') : 'No formula: quantity = measured × multiplier');
+    if (er) return;
+    if (scope === 'markup') { if ((m.formula || '') !== v) { if (!undone) { pushUndo(); undone = true; } if (v) m.formula = v; else delete m.formula; touch(); } }
+    else if ((p.formula || '') !== v) { p.formula = v; clearTimeout(saveT); saveT = setTimeout(() => saveProduct(p), 300); }
+    live(); clearTimeout(check.t); check.t = setTimeout(() => { refreshPanel(); if (S.view === 'estimate') renderEstimate(); }, 250);
+  };
+  inp.oninput = check; check();
+  body.querySelector('#fxClear').onclick = () => { inp.value = ''; check(); inp.focus(); };
+  body.querySelector('#fxPreset').onchange = e => { if (e.target.value) { inp.value = e.target.value; check(); } e.target.value = ''; };
+  body.querySelector('#fxHelpT').onclick = () => body.querySelector('#fxHelpBox').classList.toggle('hidden');
+  body.querySelectorAll('[data-fs]').forEach(b => b.onclick = () => { S.fxScope = b.dataset.fs; renderDock(true); });
+}
+/* product form shared by the dock and the Products page (inline, no popup) */
+const UNITS = ['LF', 'SF', 'EA', 'SY', 'SHT', 'BOX', 'HR', 'SET'];
+function blankProduct(o = {}) { return { id: uid(), name: '', category: '', unit: 'EA', price: 0, labor: 0, waste: 0, color: PALETTE[S.products.length % PALETTE.length], mult: 1, formula: '', ...o }; }
+function productFormHTML(p, opts = {}) {
+  const cats = [...new Set(S.products.map(x => x.category).filter(Boolean))];
+  const f = (k, label, v, extra = '') => `<label class="pf pf-${k}"><span>${label}</span><input data-pf="${k}" value="${esc(v)}" ${extra}></label>`;
+  return `<div class="pform">${f('name', 'Name', p.name, 'placeholder="e.g. Drywall 4x8" autocomplete="off"')}${f('category', 'Category', p.category, 'list="dtCats" autocomplete="off"')}${f('unit', 'Unit', p.unit, 'list="dtUnits" autocomplete="off"')}${f('price', 'Unit price $', p.price, 'inputmode="decimal"')}${f('labor', 'Labor/unit $', p.labor || 0, 'inputmode="decimal"')}${f('waste', 'Waste %', p.waste || 0, 'inputmode="decimal"')}${f('mult', 'Multiplier', p.mult || 1, 'inputmode="decimal" title="Converts what you measure into this unit. 1 = no change. 0.03125 turns SF into 4×8 sheets."')}<label class="pf pf-color"><span>Color</span><input type="color" data-pf="color" value="${hex6(p.color)}"></label>${opts.formula ? f('formula', 'Quantity formula ƒx (optional)', p.formula || '', 'spellcheck="false" autocapitalize="off" autocomplete="off" class="mono" placeholder="e.g. ceil(Area / 32)"') + '<span class="small pf-msg" data-fxmsg></span>' : ''}</div>
+    <datalist id="dtCats">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist><datalist id="dtUnits">${UNITS.map(u => `<option value="${u}">`).join('')}</datalist>`;
+}
+function readPF(root) {
+  const v = k => root.querySelector(`[data-pf=${k}]`), o = {};
+  if (v('name')) o.name = v('name').value.trim(); if (v('category')) o.category = v('category').value.trim(); if (v('unit')) o.unit = (v('unit').value.trim() || 'EA').toUpperCase();
+  for (const k of ['price', 'labor', 'waste']) if (v(k)) o[k] = num(v(k).value);
+  if (v('mult')) o.mult = num(v('mult').value, 1) || 1; if (v('color')) o.color = v('color').value; if (v('formula')) o.formula = v('formula').value.trim();
+  return o;
+}
+function fxCheckEl(root) {
+  const i = root.querySelector('[data-pf=formula]'), msg = root.querySelector('[data-fxmsg]'); if (!i) return true;
+  const f = i.value.trim(), er = f ? fxProblem(f) : ''; if (msg) { msg.className = 'small pf-msg ' + (er ? 'fxerr' : f ? 'fxok' : 'muted'); msg.textContent = er ? '⚠ ' + er : f ? '✓ formula OK' : 'Blank: measured × multiplier'; }
+  return !er;
+}
+function bindProductForm(root, p) {   // p = existing product → saves as you go; null → new-product form
+  const fi = root.querySelector('[data-pf=formula]'); if (fi) { fi.addEventListener('input', () => fxCheckEl(root)); fxCheckEl(root); }
+  if (!p) return;
+  root.querySelectorAll('[data-pf]').forEach(el => el.addEventListener('change', async () => {
+    if (!fxCheckEl(root)) return toast('Fix the formula first (or clear it)');
+    const o = readPF(root); if (!o.name) return toast('Name is required');
+    Object.assign(p, o); await saveProduct(p); refreshActiveProduct(); renderOverlay(); refreshPanel(); setSave('Saved');
+  }));
+}
+async function createProduct(o, root) {
+  if (root && !fxCheckEl(root)) { toast('Fix the formula first (or clear it)'); return null; }
+  if (!o.name) { toast('Give the product a name'); root?.querySelector('[data-pf=name]')?.focus(); return null; }
+  const dup = S.products.find(x => x.name.toLowerCase() === o.name.toLowerCase() && (x.category || '').toLowerCase() === (o.category || '').toLowerCase());
+  if (dup) { toast(`"${dup.name}" already exists, using it`); return dup; }
+  const p = blankProduct(o); await saveProduct(p); S.products.push(p); return p;
+}
+function openNewProduct() {   // "+ Add new product…" from the toolbar dropdown: inline form in the bottom dock, the drawing stays put
+  const q = pickerMode() === 'sel' ? selMarks().filter(isQty) : [];
+  const t = q[0]?.type || S.tool, unit = { length: 'LF', area: 'SF', count: 'EA' }[t] || 'EA';
+  S.dockNew = { draft: blankProduct({ unit }), assign: q.map(m => m.id) };
+  if (S.view !== 'plans') switchView('plans');
+  setDockTab('prod'); setTimeout(() => $('#dockBody [data-pf=name]')?.focus(), 30);
+}
+function dockProd(body) {
+  if (S.dockNew) {
+    const N = S.dockNew;
+    body.innerHTML = `<div class="dhead"><b>＋ New product</b><span class="muted small">${N.assign.length ? `Will be applied to the ${N.assign.length} selected markup${N.assign.length > 1 ? 's' : ''}.` : 'Becomes the product you draw with next.'}</span></div>${productFormHTML(N.draft)}<div class="actions"><button class="small" id="npCancel">Cancel</button><button class="small accent" id="npAdd">Add product</button></div>`;
+    bindProductForm(body, null);
+    body.querySelectorAll('[data-pf]').forEach(el => el.addEventListener('input', () => Object.assign(N.draft, readPF(body))));
+    body.querySelector('[data-pf=name]').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); body.querySelector('#npAdd').click(); } });
+    body.querySelector('#npCancel').onclick = () => { S.dockNew = null; renderDock(true); };
+    body.querySelector('#npAdd').onclick = async () => {
+      const p = await createProduct(readPF(body), body); if (!p) return;
+      const ids = new Set(N.assign); S.dockNew = null;
+      const ms = S.project ? S.project.markups.filter(m => ids.has(m.id)) : [];
+      if (ms.length) { pushUndo(); for (const m of ms) { m.productId = p.id; m.color = null; } touch(); toast(`Added ${p.name} → ${ms.length} markup${ms.length > 1 ? 's' : ''}`); }
+      else { S.activeProductId = p.id; toast(`Added ${p.name}: draw with it now`); }
+      refreshActiveProduct(); renderOverlay(); refreshPanel(); renderDock(true);
+      if (!ms.length) autoToolFor(p);
+    };
+    return;
+  }
+  const { p } = dockTarget();
+  if (!p) { body.innerHTML = `<div class="dhead"><b>Product</b><span class="muted small">No product picked. Choose one in the Product box at the top, or add one here.</span><button class="small accent" id="npOpen">＋ New product</button></div>`; body.querySelector('#npOpen').onclick = openNewProduct; return; }
+  body.innerHTML = `<div class="dhead"><span class="sw" style="background:${p.color}"></span><b>${esc(p.name)}</b><span class="muted small">Edits save as you go and apply everywhere this product is used.</span><button class="small" id="npOpen">＋ New product</button></div>${productFormHTML(p)}`;
+  bindProductForm(body, p); body.querySelector('#npOpen').onclick = openNewProduct;
+}
+function dockScale(body) {
+  if (!S.page) { body.innerHTML = '<p class="muted small">Open a PDF first.</p>'; return; }
+  const cur = curScale();
+  if (S.calib) {
+    body.innerHTML = `<div class="dhead"><b>Calibrate</b><span class="muted small">Measured ${fmtN(S.calib.dPts / 72, 3)}" on the sheet. What is the real length?</span></div>
+      <form id="cf" class="fxRow"><input id="cFt" inputmode="decimal" placeholder="feet" style="width:90px"><span>ft</span><input id="cIn" placeholder="inches (6 1/2)" style="width:130px"><span>in</span>
+      <label class="chk small"><input type="checkbox" id="cAll" ${S.calAllPages ? 'checked' : ''}> every page in this PDF</label><button type="button" class="small" id="cCancel">Cancel</button><button class="small accent" id="cOk">Set scale</button></form>`;
+    body.querySelector('#cCancel').onclick = () => { S.calib = null; setTool('select'); renderDock(true); };
+    body.querySelector('#cf').onsubmit = e => {
+      e.preventDefault(); const ft = num(body.querySelector('#cFt').value, 0), inch = parseInches(body.querySelector('#cIn').value);
+      const real = ft + (isFinite(inch) ? inch : 0) / 12; if (!(real > 0) || !isFinite(inch)) return toast('Enter the real length');
+      const k = real / S.calib.dPts, near = nearPreset(k), label = near ? `${near} (calibrated)` : `1" = ${fmtFtIn(k * 72)} (calibrated)`;
+      S.calib = null; setScale(k, label, body.querySelector('#cAll').checked); const nt = S.scaleNext; S.scaleNext = null; setTool(nt || 'select'); renderDock(true);
+    };
+    return;
+  }
+  const groups = [...new Set(SCALES.map(s => s.group))];
+  const opts = groups.map(g => `<optgroup label="${g}">${SCALES.filter(s => s.group === g).map(s => `<option value="${SCALES.indexOf(s)}" ${cur && Math.abs(cur.ftPerPt - s.ftPerPt) < 1e-12 ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}</optgroup>`).join('');
+  body.innerHTML = `<div class="dhead"><b>Scale for page ${S.pageNum}</b><span class="muted small">Current: <b>${esc(cur?.label || 'not set')}</b>. Presets assume the PDF is at full sheet size.${S.scaleNext ? ` Then you can draw your ${S.scaleNext}.` : ''}</span></div>
+    <div class="fxRow"><select id="scSel">${cur ? '' : '<option value="">Choose a scale…</option>'}${opts}</select><label class="chk small"><input type="checkbox" id="scAll"> every page in this PDF</label><button class="small accent" id="scOk">Use preset</button><button class="small" id="scMeasure">Calibrate from a known dimension…</button></div>`;
+  body.querySelector('#scOk').onclick = () => { const v = body.querySelector('#scSel').value; if (v === '') return toast('Pick a scale'); const s = SCALES[+v]; setScale(s.ftPerPt, s.label, body.querySelector('#scAll').checked); const nt = S.scaleNext; S.scaleNext = null; if (nt) setTool(nt); renderDock(true); };
+  body.querySelector('#scMeasure').onclick = () => { S.calAllPages = body.querySelector('#scAll').checked; const nt = S.scaleNext; setTool('calibrate'); S.scaleNext = nt; };
+}
+function dockPrint(body) {
+  const n = S.project ? new Set(S.project.markups.map(m => m.docId + ':' + m.page)).size : 0;
+  body.innerHTML = `<div class="dhead"><b>Print the marked-up drawing</b><span class="muted small">Prints (or saves as PDF) the sheet with every markup, highlight and note drawn on it. File name: <b>${esc(drawingTitle())}</b></span></div>
+    <div class="fxRow"><label class="chk"><input type="radio" name="prW" value="page" ${UI.prAll ? '' : 'checked'}> This page</label><label class="chk"><input type="radio" name="prW" value="all" ${UI.prAll ? 'checked' : ''}> All marked pages (${n})</label>
+    <label class="chk"><input type="checkbox" id="prLeg" ${UI.prLegend === false ? '' : 'checked'}> Quantity legend</label><button class="accent" id="prGo">🖨 Print drawing</button></div>`;
+  body.querySelectorAll('[name=prW]').forEach(r => r.onchange = () => { UI.prAll = r.value === 'all' && r.checked; saveUI(); });
+  body.querySelector('#prLeg').onchange = e => { UI.prLegend = e.target.checked; saveUI(); };
+  body.querySelector('#prGo').onclick = () => printDrawing(!!UI.prAll);
+}
+
+/* ======================= v1.6: print the marked-up drawing ======================= */
+function drawingTitle() { const n = pdfTitle(S.project?.name); return (!n ? 'Hardware Takeoff' : /hardware takeoff$/i.test(n) ? n : n + ' Hardware Takeoff') + ' - Drawing'; }
+let printUrls = [];
+function setPrintMode(mode, landscape) {
+  const pa = $('#printArea'); pa.classList.toggle('drawing', mode === 'drawing');
+  if (mode !== 'drawing') { printUrls.forEach(u => URL.revokeObjectURL(u)); printUrls = []; }
+  let st = $('#printPageStyle'); if (!st) { st = document.createElement('style'); st.id = 'printPageStyle'; document.head.appendChild(st); }
+  st.textContent = mode === 'drawing' ? `@page { size: ${landscape ? 'landscape' : 'portrait'}; margin: 0.3in; }` : '';
+}
+async function printDrawing(all = false) {
+  if (!S.project) return toast('Open a project first');
+  closeTextEditor(); await flush();
+  let pages;
+  if (all) {
+    const seen = new Map(), order = S.project.docs.map(d => d.id);
+    for (const m of S.project.markups) if (order.includes(m.docId)) seen.set(m.docId + ':' + m.page, [m.docId, m.page]);
+    pages = [...seen.values()].sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]) || a[1] - b[1]);
+    if (!pages.length) return toast('No markups to print yet');
+  } else { if (!S.page) return toast('Open a PDF first'); pages = [[S.docId, S.pageNum]]; }
+  toast(`Preparing ${pages.length > 1 ? pages.length + ' drawings' : 'the drawing'}…`, 15000);
+  setPrintMode('summary');
+  const secs = []; let land = null;
+  for (const [d, pn] of pages) {
+    try {
+      const pdf = await getPdf(d), pg = await pdf.getPage(pn), v1 = pg.getViewport({ scale: 1 }), W = v1.width, H = v1.height;
+      if (land === null) land = W > H;
+      const k = Math.min(2.5, Math.sqrt(MAX_PIX * 0.5 / (W * H)), MAX_SIDE / Math.max(W, H)), vp = pg.getViewport({ scale: k });
+      const c = document.createElement('canvas'); c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+      const ctx = c.getContext('2d', { alpha: false }); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      await pg.render({ canvasContext: ctx, viewport: vp }).promise;
+      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9)); c.width = c.height = 1;
+      const url = URL.createObjectURL(blob); printUrls.push(url);
+      const ms = S.project.markups.filter(m => m.docId === d && m.page === pn);
+      const zP = 1.6 * 720 / Math.max(W, H);   // label pills ≈ 9 pt on a letter / tabloid sheet
+      const doc = S.project.docs.find(x => x.id === d), sc = S.project.scales[pageKey(d, pn)];
+      const leg = UI.prLegend === false ? [] : pageAgg(ms);
+      secs.push(`<section class="pdraw"><div class="pdHead"><b>${esc(S.project.name || 'Hardware Takeoff')}</b> · ${esc(doc?.name || '')} · page ${pn}${sc ? ' · scale ' + esc(sc.label) : ''} · ${new Date().toLocaleDateString()}</div>
+        <div class="pdBox"><img src="${url}" alt=""><svg class="mk" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${markupsSVG(ms, zP, () => false, `p${secs.length}-`)}</svg></div>
+        ${leg.length ? `<div class="pdLeg">${leg.map(a => `<span><i style="background:${a.color}"></i>${esc(a.name)}: <b>${fmtQty(a.q, a.unit)} ${esc(a.unit)}</b></span>`).join('')}</div>` : ''}</section>`);
+    } catch (e) { console.warn(e); toast('Could not render page ' + pn); }
+  }
+  if (!secs.length) return;
+  setPrintMode('drawing', !!land);
+  $('#printArea').innerHTML = secs.join('');
+  await Promise.all([...$('#printArea').querySelectorAll('img')].map(i => i.decode().catch(() => { })));
+  toast('Opening print…', 1200);
+  setPrintTitle(' - Drawing'); window.print();
+}
+$('#btnPrintDrawing').onclick = () => printDrawing(false);
+$('#btnPrintDrawings').onclick = () => printDrawing(true);
+$('#btnNewProd').onclick = openNewProduct;
+
+/* dock wiring */
+$$('#dockTabs button').forEach(b => b.onclick = () => { if (b.dataset.dt !== 'prod') S.dockNew = null; setDockTab(b.dataset.dt); });
+$('#dockMin').onclick = () => { UI.dockMin = !UI.dockMin; saveUI(); applyDock(); };
+$('#dockSplit').addEventListener('pointerdown', e => {
+  if (UI.dockMin) return; e.preventDefault(); const sp = e.currentTarget; sp.setPointerCapture(e.pointerId); sp.classList.add('drag');
+  const col = $('#viewerCol');
+  const mv = ev => { const r = col.getBoundingClientRect(); UI.dockH = Math.round(clamp(r.bottom - ev.clientY, 90, Math.max(120, r.height - 140))); $('#dock').style.height = UI.dockH + 'px'; };
+  const up = () => { sp.classList.remove('drag'); sp.removeEventListener('pointermove', mv); sp.removeEventListener('pointerup', up); saveUI(); S.page && scheduleDetail(); };
+  sp.addEventListener('pointermove', mv); sp.addEventListener('pointerup', up); sp.addEventListener('pointercancel', up);
+});
+$('#dockSplit').addEventListener('dblclick', () => { delete UI.dockH; saveUI(); applyDock(); });
+applyDock(); renderDock(true);

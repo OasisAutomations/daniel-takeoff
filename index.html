@@ -34,9 +34,21 @@
         <button class="tool" data-tool="area" title="Area (A)"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 5h12v10H8L4 11z" fill="currentColor" fill-opacity=".25"/></svg> <span>Area</span></button>
         <button class="tool" data-tool="count" title="Count (C)"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><circle cx="6" cy="7" r="2.2" fill="currentColor"/><circle cx="14" cy="7" r="2.2" fill="currentColor"/><circle cx="10" cy="14" r="2.2" fill="currentColor"/></svg> <span>Count</span></button>
       </div>
+      <div class="grp" id="annGroup" title="Markup tools: drawing notes only, never counted in quantities">
+        <button class="tool" data-tool="highlight" title="Highlighter (H): semi-transparent; drag freehand, Shift = straight"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 16l3-1 9-9-2-2-9 9z"/><path d="M3 18h9" stroke="#ffd23f" stroke-width="3" stroke-opacity=".8"/></svg> <span>Highlight</span></button>
+        <button class="tool" data-tool="pen" title="Pen (P): freehand ink, Shift = straight"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3 15c3-6 5 2 8-3s4-4 6-5"/></svg> <span>Pen</span></button>
+        <button class="tool" data-tool="line" title="Line: drag"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 16L16 4"/></svg> <span>Line</span></button>
+        <button class="tool" data-tool="arrow" title="Arrow (W): drag from tail to tip"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 16L16 4M9 4h7v7"/></svg> <span>Arrow</span></button>
+        <button class="tool" data-tool="rect" title="Rectangle (R): drag"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><rect x="3.5" y="5" width="13" height="10" rx="1"/></svg> <span>Rect</span></button>
+        <button class="tool" data-tool="ellipse" title="Ellipse (E): drag"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><ellipse cx="10" cy="10" rx="7" ry="5"/></svg> <span>Ellipse</span></button>
+        <button class="tool" data-tool="cloud" title="Revision cloud (K): drag"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M5 14a2 2 0 0 1 0-4 2.5 2.5 0 0 1 4-3 2.5 2.5 0 0 1 5 1 2 2 0 0 1 1 4 2 2 0 0 1-3 2 2.5 2.5 0 0 1-4 0 2 2 0 0 1-3 0z"/></svg> <span>Cloud</span></button>
+        <button class="tool" data-tool="text" title="Text box (T): tap to type; double-click text to edit"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 5h12M10 5v11M7.5 16h5"/></svg> <span>Text</span></button>
+        <button class="tool" data-tool="callout" title="Callout: drag from the point to where the text goes"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><rect x="8" y="3" width="9" height="7" rx="1"/><path d="M8 9L3 16"/></svg> <span>Callout</span></button>
+      </div>
       <div class="grp" id="prodGroup">
         <label id="prodLabel" for="activeProduct">Draw with:</label>
         <select id="activeProduct" title="The one product box: sets the product for new markups, or for the selected markups"></select>
+        <button id="btnNewProd" title="Add a new product without leaving the drawing">＋</button>
       </div>
       <div class="grp">
         <button id="btnMulti" title="Multi-select: tap items to add or remove them (same as holding Shift). Shift+drag on empty space draws a selection box.">☑ Multi</button>
@@ -48,6 +60,7 @@
       </div>
       <div class="grp">
         <button id="btnScale" class="scalebtn" title="Set scale for this page"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M2 13l11-11 5 5-11 11z"/><path d="M6 9l1.5 1.5M8.5 6.5l1.5 1.5M11 4l1.5 1.5"/></svg> <span id="scaleLabel">No scale</span></button>
+        <button id="btnPrintDrawing" title="Print or save as PDF this marked-up drawing (more options in the Print tab below)">🖨<span> Print</span></button>
       </div>
       <div class="grp right">
         <button id="zoomOut" title="Zoom out">−</button>
@@ -72,10 +85,11 @@
         </div>
       </aside>
       <div class="split" id="splitSide" data-split="side" title="Drag to resize"></div>
+      <div id="viewerCol">
       <div id="viewer">
         <div id="stage"><canvas id="baseCanvas"></canvas></div>
         <canvas id="detailCanvas"></canvas>
-        <svg id="overlay" xmlns="http://www.w3.org/2000/svg"><g id="world"></g></svg>
+        <svg id="overlay" class="mk" xmlns="http://www.w3.org/2000/svg"><g id="world"></g></svg>
         <div id="hint" class="hint"></div>
         <div id="marquee" class="hidden"></div>
         <div id="selBar" class="hidden">
@@ -95,6 +109,22 @@
         <div id="pageNav">
           <button id="prevPage">‹</button><span id="pageLabel">–</span><button id="nextPage">›</button>
         </div>
+      </div>
+      <div id="dockSplit" title="Drag to resize the bottom panel (double-click to reset)"></div>
+      <div id="dock">
+        <div id="dockBar">
+          <div id="dockTabs" role="tablist">
+            <button data-dt="props" title="Label, text and look of the selected markup">Properties</button>
+            <button data-dt="fx" title="Quantity formulas with live results">ƒx Formula</button>
+            <button data-dt="prod" title="Product details, or add a new product">Product</button>
+            <button data-dt="scale" title="Set or calibrate the page scale">Scale</button>
+            <button data-dt="print" title="Print or save the marked-up drawing">Print</button>
+          </div>
+          <span id="dockCtx" class="muted small"></span>
+          <button id="dockMin" class="pbtn" title="Minimize the bottom panel">▾</button>
+        </div>
+        <div id="dockBody"></div>
+      </div>
       </div>
       <div class="split" id="splitPanel" data-split="panel" title="Drag to resize"></div>
       <aside id="panel">
@@ -128,8 +158,10 @@
           <button id="btnExportXlsx" class="accent">Export Excel (.xlsx)</button>
           <label class="toggle" title="Add a subtotal row under each category in the printed summary"><input type="checkbox" id="togPrintSubs"> Category subtotals in print</label>
           <button id="btnPrint">Print summary</button>
+          <button id="btnPrintDrawings" title="Print or save as PDF every marked-up drawing">🖨 Print drawings</button>
         </div>
       </div>
+      <div id="fxHelpInline" class="fxhelp hidden"></div>
       <div class="tableWrap"><table id="estTable" class="grid"></table></div>
       <div id="estTotals" class="totals"></div>
       <p class="muted small" id="estNote"></p>
