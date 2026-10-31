@@ -3,7 +3,7 @@ import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.8.1';
+const VER = 'v1.8.2';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -2067,7 +2067,7 @@ function applyTheme() {
   document.documentElement.dataset.theme = eff;
   document.querySelector('meta[name=theme-color]')?.setAttribute('content', eff === 'light' ? '#ffffff' : '#1c2126');
   $('#viewer')?.classList.toggle('darksheet', !!UI.darkSheet);
-  const b = $('#btnTheme'); if (b) { b.textContent = THEME_NAMES[t] || THEME_NAMES.dark; b.title = `Theme: ${t} (tap to change: dark → light → follow the system)`; }
+  const b = $('#btnTheme'); if (b) { const tn = (THEME_NAMES[t] || THEME_NAMES.dark).split(' '); b.innerHTML = `${tn[0]}<span> ${tn[1]}</span>`; b.title = `Theme: ${t} (tap to change: dark → light → follow the system)`; }
 }
 matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', () => { if (UI.theme === 'system') applyTheme(); });
 $('#btnTheme') && ($('#btnTheme').onclick = () => { const o = ['dark', 'light', 'system']; UI.theme = o[(o.indexOf(UI.theme || 'dark') + 1) % 3]; saveUI(); applyTheme(); toast('Theme: ' + UI.theme, 1200); });
@@ -2076,6 +2076,46 @@ $('#btnOrtho') && ($('#btnOrtho').onclick = () => toggleDraftOpt('ortho'));
 $('#btnGrid') && ($('#btnGrid').onclick = () => toggleDraftOpt('grid'));
 $('#btnDarkSheet') && ($('#btnDarkSheet').onclick = () => toggleDraftOpt('darkSheet'));
 applyTheme(); syncSnapBar();
+
+/* ---- v1.8.2 toolbar zones: on narrow screens each zone is a button showing its name + the active tool's icon; tap to open its tools ---- */
+const ZONES = $$('#toolbar .zone');
+function closeZones(except) { ZONES.forEach(z => { if (z !== except && z.classList.contains('open')) { z.classList.remove('open'); z.querySelector('.zbtn').setAttribute('aria-expanded', 'false'); } }); }
+function zoneIcon(z) {
+  const body = z.querySelector('.zbody'), name = z.dataset.zone;
+  if (name === 'precision') return [...body.querySelectorAll('.tgl.on')].map(b => b.textContent.trim().split(' ')[0]).join('') || '';
+  if (name === 'view') return $('#zoomLabel')?.textContent || '';
+  if (name === 'output') return ($('#scaleLabel')?.textContent || '').slice(0, 14);
+  if (name === 'product') { const s = $('#activeProduct'); const o = s && s.selectedOptions[0]; return o && s.value ? '●' : ''; }
+  const on = body.querySelector('.tool.on'); return on ? on.querySelector('svg')?.outerHTML || '' : '';
+}
+function placeZone(z) {   // keep the open popover on screen
+  const body = z.querySelector('.zbody'); body.style.left = '0px';
+  const r = body.getBoundingClientRect(), over = r.right - (innerWidth - 6); if (over > 0) body.style.left = -Math.min(over, r.left - 6) + 'px';
+}
+function syncZones() {
+  ZONES.forEach(z => {
+    const ic = z.querySelector('.zic'), btn = z.querySelector('.zbtn'), v = zoneIcon(z);
+    if (ic.innerHTML !== v) ic.innerHTML = v;
+    btn.classList.toggle('on', !!z.querySelector('.zbody .tool.on'));
+  });
+  ZONES.forEach(z => { if (z.classList.contains('open')) placeZone(z); });
+}
+ZONES.forEach(z => {
+  const btn = z.querySelector('.zbtn'), body = z.querySelector('.zbody');
+  body.dataset.cap = z.querySelector('.zcap').textContent;
+  btn.onclick = e => {
+    e.stopPropagation(); const open = !z.classList.contains('open'); closeZones(z);
+    z.classList.toggle('open', open); btn.setAttribute('aria-expanded', String(open));
+    if (open) placeZone(z);
+  };
+  body.addEventListener('click', e => { const b = e.target.closest('button'); if (b && (b.classList.contains('tool') || ['btnPrintDrawing', 'btnScale', 'btnNewProd'].includes(b.id))) closeZones(); });
+});
+document.addEventListener('pointerdown', e => { if (!e.target.closest('#toolbar .zone.open')) closeZones(); }, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeZones(); }, true);
+addEventListener('resize', () => { if (innerWidth > 800) closeZones(); });
+new MutationObserver(() => syncZones()).observe($('#toolbar'), { subtree: true, attributes: true, attributeFilter: ['class'], childList: true, characterData: true });
+$('#activeProduct')?.addEventListener('change', syncZones);
+syncZones();
 
 /* ---- assemblies (wall types): a template of components, each with a quantity formula on the wall's LF, height, sides and openings ---- */
 const ASM_KINDS = { wall: 'Wall type', ceiling: 'Ceiling', soffit: 'Soffit' };

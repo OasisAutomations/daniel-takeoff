@@ -206,7 +206,6 @@ svg.mk text.at.b{font-weight:700}
 #annGroup{gap:2px}
 #annGroup .tool{padding:5px 7px}
 #annGroup .tool span{display:none}
-@media (min-width:1500px){#annGroup .tool span{display:inline}}
 #btnNewProd{padding:4px 9px;font-weight:700}
 #viewerCol{flex:1;min-width:0;display:flex;flex-direction:column;min-height:0}
 #viewerCol>#viewer{flex:1;min-height:80px}
@@ -300,8 +299,6 @@ button.on{background:var(--accentDim);border-color:var(--accent2)}
 .htg{font-style:normal;font-size:11px;color:var(--muted);width:64px}
 .wallp{flex-wrap:wrap;align-items:flex-end}
 #btnAddBlank{white-space:nowrap}
-@media (min-width:1500px){#draftGroup .tool span{display:inline}}
-@media (max-width:1500px){#draftGroup .tool span{display:none}}
 
 /* ===== v1.8: theme, snap toolbar, assemblies ===== */
 html[data-theme=light]{--bg:#eef1f4;--bg2:#ffffff;--panel:#f7f8fa;--line:#d5dbe1;--line2:#bcc5ce;--text:#1d252c;--muted:#5d6974;--accent:#1f8a7d;--accent2:#147a6e;--accentDim:#cdeae6;--danger:#b8453d;--plan:#d9dee3;--input:#ffffff;--top:#ffffff;color-scheme:light}
@@ -310,8 +307,6 @@ html[data-theme=light] .tool.on,html[data-theme=light] .tgl.on{color:#0d3d37}
 html[data-theme=light] .hint,html[data-theme=light] #pageNav{background:rgba(255,255,255,.94)}
 html[data-theme=light] #toast{background:#fff;color:var(--text)}
 html[data-theme=light] .fxT tr.on{background:rgba(255,190,0,.18)}
-#btnTheme{min-height:28px;padding:3px 9px;margin-left:auto}
-#btnTheme+#saveState{margin-left:0}
 .tgl{min-height:30px;padding:4px 8px;font-size:12.5px}
 .tgl.on{background:var(--accentDim);border-color:var(--accent2);color:#fff}
 #viewer.darksheet #baseCanvas,#viewer.darksheet #detailCanvas{filter:invert(1) hue-rotate(180deg)}
@@ -353,3 +348,51 @@ html[data-theme=light] .warnnote,html[data-theme=light] .warn{color:#8a6500}
 .fontrow .fxRow{flex-wrap:wrap;gap:6px;align-items:center}.fontrow select{min-width:200px;font-size:15px}
 .alignb{min-width:34px}.alignb.on{background:var(--accent,#1f8a7e);color:#fff}
 .ufonts{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}.ufonts .uf button{font-family:system-ui,'Segoe UI',Arial,sans-serif;font-style:normal;padding:0 7px;min-width:26px}.ufonts .uf{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:6px;padding:1px 2px 1px 8px;font-size:13px}
+
+/* ===== v1.8.2: toolbar zones (labeled groups that wrap whole; collapse to dropdowns on phones) ===== */
+#toolbar{gap:6px 6px;padding:5px 8px 6px;align-items:stretch}
+.zone{flex:none;display:flex;flex-direction:column;gap:1px;padding:1px 5px 4px;border:1px solid var(--line);border-radius:9px;background:var(--zbg,rgba(255,255,255,.035));position:relative}
+html[data-theme=light] .zone{--zbg:rgba(20,40,60,.035)}
+.zcap{font-size:9.5px;line-height:13px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);padding:0 2px;white-space:nowrap;user-select:none}
+.zcap::before{content:"";display:inline-block;width:6px;height:6px;border-radius:2px;margin-right:5px;vertical-align:1px;background:var(--zc,var(--muted))}
+.zone[data-zone=measure]{--zc:#2a9d8f}.zone[data-zone=markup]{--zc:#e0a526}.zone[data-zone=draft]{--zc:#5b8def}.zone[data-zone=precision]{--zc:#c76bd6}
+.zone[data-zone=product]{--zc:#2a9d8f}.zone[data-zone=edit]{--zc:#97a3ae}.zone[data-zone=output]{--zc:#e07a5f}.zone[data-zone=view]{--zc:#6cb4c9}
+.zrow,.zbody,.zkeep,#prodGroup,.zoomg{display:flex;align-items:center;gap:3px}
+.zrow{gap:3px}
+.zbody:empty{display:none}
+.zoomg{gap:2px}
+#toolbar .zone button{min-height:30px;padding:4px 8px}
+#toolbar .zone .tool{padding:4px 7px;display:inline-flex;align-items:center;gap:4px}
+#toolbar .zone select{min-height:30px;padding:3px 6px}
+#toolbar .zone .tgl{font-size:13px}
+.zbreak{flex-basis:100%;height:0}
+.zone[data-zone=view]{margin-left:auto}
+.zbtn{display:none}
+.zbtn.on{background:var(--accentDim);border-color:var(--accent2)}
+html[data-theme=light] .zbtn.on{color:#0d3d37}
+.zic{display:inline-flex;align-items:center;gap:2px;margin-left:5px}
+.zic svg{width:15px;height:15px}
+.zic:empty{display:none}
+.zcar{margin-left:4px;font-size:10px;opacity:.7}
+#prodGroup.selmode{padding:1px 5px}
+@media (max-width:1700px){#draftGroup .tool span{display:none}}
+@media (max-width:1100px){#prodGroup:not(.selmode) #prodLabel{display:none}#activeProduct{max-width:180px}}
+@media (max-width:1300px){.zone[data-zone=view] .tgl span,#btnTheme span{display:none}}
+@media (max-width:1100px){#toolbar .zone .tool{padding:4px 6px}#toolbar .zone .tgl{padding:4px 7px}}
+/* phones / narrow: each zone is one button; its tools open in a popover under it */
+@media (max-width:800px){
+  #toolbar{gap:4px;padding:4px 6px}
+  .zbreak{display:none}
+  .zone{padding:2px;border-radius:8px}
+  .zone[data-zone=view]{margin-left:0}
+  .zcap{display:none}
+  .zbtn{display:inline-flex;align-items:center;padding:3px 8px!important;font-size:12.5px;font-weight:600}
+  .zbody{display:none;position:absolute;z-index:60;top:calc(100% + 4px);left:0;flex-wrap:wrap;gap:4px;padding:6px;width:max-content;max-width:calc(100vw - 12px);background:var(--panel);border:1px solid var(--line2);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+  .zone.open .zbody{display:flex}
+  .zone.open>.zcap+.zrow>.zbtn{border-color:var(--accent2)}
+  .zone.open .zbody::before{content:attr(data-cap);flex-basis:100%;font-size:10px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);padding:0 2px}
+  #toolbar .zone.open .zbody .tool span,#toolbar .zone.open .zbody .tgl span,.zone.open #btnTheme span,.zone.open #btnPrintDrawing span{display:inline}
+  .zone.open .zbody #prodLabel{display:inline}
+  .zone[data-zone=edit] .zbtn{display:none}
+  #toolbar .zone button{min-height:32px}
+}
