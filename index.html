@@ -45,6 +45,12 @@
         <button class="tool" data-tool="text" title="Text box (T): tap to type; double-click text to edit"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M4 5h12M10 5v11M7.5 16h5"/></svg> <span>Text</span></button>
         <button class="tool" data-tool="callout" title="Callout: drag from the point to where the text goes"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><rect x="8" y="3" width="9" height="7" rx="1"/><path d="M8 9L3 16"/></svg> <span>Callout</span></button>
       </div>
+      <div class="grp" id="draftGroup" title="Draw your own plan: plan linework (never counted) and walls (counted as length)">
+        <button class="tool" data-tool="dline" title="Plan line / polyline (D): tap points, type exact lengths in the Draw panel"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3 16V6h9v8h5"/></svg> <span>Plan line</span></button>
+        <button class="tool" data-tool="drect" title="Plan rectangle: two corners or typed width × height"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><rect x="3" y="5" width="14" height="10"/><path d="M3 5l3 3"/></svg> <span>Plan rect</span></button>
+        <button class="tool" data-tool="wall" title="Wall with real thickness and pattern (counts as centerline length)"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3 7h14M3 13h14" /><path d="M5 7l-2 3M9 7l-4 6M13 7l-4 6M17 7l-4 6M17 11l-2 2" stroke-width="1.1"/></svg> <span>Wall</span></button>
+        <button class="tool" data-tool="dim" title="Dimension (M): two points, then where the line goes"><svg class="ic" viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"><path d="M3 6v8M17 6v8M3 10h14"/><path d="M2 11.5l2-3M16 11.5l2-3" stroke-width="1.3"/></svg> <span>Dimension</span></button>
+      </div>
       <div class="grp" id="prodGroup">
         <label id="prodLabel" for="activeProduct">Draw with:</label>
         <select id="activeProduct" title="The one product box: sets the product for new markups, or for the selected markups"></select>
@@ -78,6 +84,7 @@
         <div class="sideHead">
           <select id="docSelect" title="PDF in this project"></select>
           <button id="btnAddPdf" class="accent small" title="Add PDF">+ PDF</button>
+          <button id="btnAddBlank" class="small" title="Add a blank page to draw on (size, orientation and scale in the Draw panel below)">+ Blank</button>
         </div>
         <div id="thumbs"></div>
         <div id="docTools" class="small">
@@ -102,9 +109,11 @@
           <button data-sa="clear" title="Deselect (Esc)">✕</button>
         </div>
         <div id="empty" class="empty">
-          <h2>Open a PDF plan to start</h2>
+          <h2>Open a PDF plan, or start a blank page</h2>
           <p>Your plans stay on this device. Nothing is uploaded.</p>
           <button id="btnEmptyAdd" class="accent big">Open PDF…</button>
+          <p class="small">or draw your own plan on a blank sheet:</p>
+          <div id="emptyBlank"></div>
         </div>
         <div id="pageNav">
           <button id="prevPage">‹</button><span id="pageLabel">–</span><button id="nextPage">›</button>
@@ -118,6 +127,7 @@
             <button data-dt="fx" title="Quantity formulas with live results">ƒx Formula</button>
             <button data-dt="prod" title="Product details, or add a new product">Product</button>
             <button data-dt="scale" title="Set or calibrate the page scale">Scale</button>
+            <button data-dt="draw" title="Blank pages and drafting: typed lengths, grid, snaps, walls, dimensions">Draw</button>
             <button data-dt="print" title="Print or save the marked-up drawing">Print</button>
           </div>
           <span id="dockCtx" class="muted small"></span>

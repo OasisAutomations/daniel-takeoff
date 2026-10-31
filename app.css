@@ -290,3 +290,15 @@ button.on{background:var(--accentDim);border-color:var(--accent2)}
 /* v1.6 phone header polish */
 #pageLabel{white-space:nowrap}
 @media (max-width:800px){.projbtn{max-width:30vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:1;min-width:0}}
+
+/* v1.7: blank pages + drafting */
+.empty .blankf{justify-content:center;flex-wrap:wrap;gap:6px}
+.empty .blankf select{max-width:150px}
+.dsec{margin-top:8px;padding-top:6px;border-top:1px solid var(--line, #2a343c)}
+.dsec .blankf{margin-top:4px}
+.hts{display:flex;flex-wrap:wrap;gap:3px;align-items:center;margin:2px 0}
+.htg{font-style:normal;font-size:11px;color:var(--muted);width:64px}
+.wallp{flex-wrap:wrap;align-items:flex-end}
+#btnAddBlank{white-space:nowrap}
+@media (min-width:1500px){#draftGroup .tool span{display:inline}}
+@media (max-width:1500px){#draftGroup .tool span{display:none}}

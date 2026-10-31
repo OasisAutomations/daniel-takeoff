@@ -106,8 +106,8 @@ export const PRESETS = [
   ['Flooring boxes (20 SF/box)', 'ceil(Area / 20)'],
   ['Square yards from SF', 'conv(Area, "sf", "sy")'],
   ['Roofing squares', 'conv(Area, "sf", "sq")'],
-  ['3 hinges per door', 'Count * 3'],
-  ['Cabinet door/drawer fronts from LF (avg 18")', 'ceil(Length / 1.5)'],
+  ['3 per item counted', 'Count * 3'],
+  ['Pieces from LF (one per 18")', 'ceil(Length / 1.5)'],
 ];
 export const HELP_HTML = `
 <p class="small">A formula turns what you measured into the quantity you buy. Type it in a product's <b>Quantity formula</b> box (runs for every markup that uses the product),
