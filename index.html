@@ -15,7 +15,7 @@
 <body>
 <header id="top">
   <div class="brand"><span class="logo">◢</span> Daniel Takeoff <span id="ver" class="ver"></span></div>
-  <button id="btnProjects" class="projbtn" title="Projects"><span id="projName">No project</span> ▾</button>
+  <button id="btnProjects" class="projbtn none" title="Projects: create or open one"><svg class="pjic" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.2l2 2h8.8A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span class="pjpre">Project:</span> <span id="projName">No project</span> ▾</button>
   <nav id="tabs">
     <button data-view="plans" class="on">Plans</button>
     <button data-view="estimate">Estimate</button>
@@ -132,7 +132,8 @@
     <div id="plansBody">
       <aside id="sidebar">
         <button class="railBtn" data-restore="side" title="Show pages panel">▤</button>
-        <div class="panelBar"><span>Pages</span><button class="pbtn" data-min="side" title="Minimize this panel">⟨</button></div>
+        <div class="panelBar"><span>Pages</span><button class="pbtn newproj" id="btnNewProj" title="Start a new project">+ New project</button><button class="pbtn" data-min="side" title="Minimize this panel">⟨</button></div>
+        <div id="newProjHost"></div>
         <div class="sideHead">
           <select id="docSelect" title="PDF in this project"></select>
           <button id="btnAddPdf" class="accent small" title="Add PDF">+ PDF</button>
@@ -166,9 +167,11 @@
           <button id="btnEmptyAdd" class="accent big">Open PDF…</button>
           <p class="small">or draw your own plan on a blank sheet:</p>
           <div id="emptyBlank"></div>
+          <p class="small">Starting a different job? <button id="btnEmptyNewProj" class="small">+ New project</button> <span class="muted">· all projects: the <b>Project</b> button at the top</span></p>
+          <div id="emptyNewProj"></div>
         </div>
         <div id="pageNav">
-          <button id="prevPage">‹</button><span id="pageLabel">–</span><button id="nextPage">›</button>
+          <button id="prevPage">‹</button><span id="pageLabel">–</span><button id="pageRename" title="Rename this page" aria-label="Rename this page">✎</button><button id="nextPage">›</button>
         </div>
       </div>
       <div id="dockSplit" title="Drag to resize the bottom panel (double-click to reset)"></div>
@@ -199,7 +202,7 @@
           <div id="pageTotals"></div>
         </div>
         <div class="box grow">
-          <div class="boxHead">Markups on this page <span class="muted small" id="pageCount"></span>
+          <div class="boxHead">Markups on this page <span class="pgHd small" id="pageNameHd"></span> <span class="muted small" id="pageCount"></span>
             <span class="boxActs"><button class="small" id="btnSelAll" title="Select every markup on this page (Ctrl+A)">Select all</button><button class="small" id="btnPaste" title="Paste copied markups (Ctrl+V)">Paste</button></span></div>
           <div id="markupList"></div>
         </div>

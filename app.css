@@ -173,6 +173,7 @@ table.fx td{padding:3px 8px}
   #printArea .n{text-align:right}
   #printArea h1{font-size:18px;margin:0 0 4px}
   #printArea .pcat{margin:0 0 14px}
+  #printArea .psh{font-size:16px;margin:18px 0 4px;break-after:avoid}#printArea .pchm{font-weight:400;font-size:11px;color:#444;margin-left:6px}#printArea .psheet{break-inside:avoid}
   #printArea .pch{font-size:14px;margin:12px 0 4px;padding:3px 6px;background:#e8e8e8;border-left:4px solid #000;break-after:avoid;page-break-after:avoid}
   #printArea thead{display:table-header-group}
   #printArea tr{break-inside:avoid;page-break-inside:avoid}
@@ -271,7 +272,8 @@ button.on{background:var(--accentDim);border-color:var(--accent2)}
   #printArea.drawing{padding:0}
   .pdraw{break-after:page;page-break-after:always;display:flex;flex-direction:column;height:calc(100vh - 2px)}
   .pdraw:last-child{break-after:auto;page-break-after:auto}
-  .pdHead{font-size:11px;padding:0 0 3px;flex:none}
+  .pdHead{font-size:11px;padding:0 0 3px;flex:none;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;border-bottom:1px solid #000;margin-bottom:3px}
+  .pdHead .pdPj{font-weight:700;font-size:13px}.pdHead .pdPg{font-weight:700;font-size:13px;padding-left:10px;border-left:1px solid #999}.pdHead .pdMeta{margin-left:auto;color:#333}
   .pdBox{position:relative;flex:1;min-height:0}
   .pdBox img,.pdBox svg{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
   .pdLeg{flex:none;display:flex;flex-wrap:wrap;gap:4px 14px;font-size:10px;padding-top:3px;border-top:1px solid #999}
@@ -396,3 +398,26 @@ html[data-theme=light] .zbtn.on{color:#0d3d37}
   .zone[data-zone=edit] .zbtn{display:none}
   #toolbar .zone button{min-height:32px}
 }
+
+/* v1.8.3: new assembly */
+.alNewW{display:inline-flex;gap:3px;align-items:center}.alNewK{display:inline-flex;gap:3px;padding:2px;border:1px dashed var(--accent2);border-radius:8px}
+/* v1.8.3: project button, page names */
+.projbtn{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line2);border-radius:8px;padding:4px 10px;white-space:nowrap}
+.projbtn .pjic{flex:none;color:var(--accent2)}.projbtn .pjpre{color:var(--muted);font-size:12px}.projbtn #projName{overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.projbtn.none .pjpre{display:none}
+.panelBar .newproj{margin-left:auto;margin-right:4px;text-transform:none;letter-spacing:0;font-size:11.5px;color:var(--accent2)}
+.npRow{display:flex;gap:4px;padding:6px;align-items:center}.npRow input{flex:1;min-width:0}
+.empty .npRow{justify-content:center}.empty .npRow input{max-width:260px}
+.thumb{cursor:pointer}.thumb:focus-visible{outline:2px solid var(--accent2)}
+.thumb .pgnm{color:var(--text);font-weight:600;word-break:break-word}
+.thumb .tren{margin-left:4px;padding:0 4px;border-radius:4px;opacity:.55;cursor:pointer}.thumb .tren:hover,.thumb .tren:focus{opacity:1;background:var(--bg3,rgba(127,127,127,.2))}
+.thumb .pgin,#pageLabel .pgin{width:100%;font-size:12px;padding:2px 4px}
+#pageLabel{max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:text}
+#pageLabel .pgin{width:200px}
+#pageNav #pageRename{padding:2px 8px;opacity:.75}
+.pgHd{color:var(--accent2);font-weight:600;text-transform:none}
+input.bad{border-color:#d9534f!important}
+@media (max-width:800px){.projbtn .pjpre{display:none}.panelBar .newproj{font-size:11px}}
+@media (max-width:560px){#top .brand{font-size:0}#top .brand .logo{font-size:18px}#top .brand .ver{display:none}.projbtn{flex:0 0 auto;min-width:76px;max-width:44vw;padding:4px 7px}.projbtn #projName{min-width:0;flex:1 1 auto}}
+@media (max-width:560px){#tabs{min-width:0;flex:1 1 auto;overflow-x:auto;scrollbar-width:none}#tabs::-webkit-scrollbar{display:none}#tabs>*{flex:none}}
+@media print{:root,html[data-theme]{color-scheme:light!important}html,body{background:#fff!important;color:#000}}

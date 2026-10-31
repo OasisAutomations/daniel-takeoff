@@ -3,7 +3,7 @@ import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.8.2';
+const VER = 'v1.8.3';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -335,7 +335,8 @@ async function addBlankPage(o = blankOpts()) {
   const n = (S.project?.docs || []).filter(d => d.blank).length + 1, name = `Blank page ${n} (${tag})`;
   const sc = SCALES.find(s => s.group === 'Architectural' && s.label === `${o.scale} = 1'-0"`);
   const f = new File([blankPdf(w, h)], name + '.pdf', { type: 'application/pdf' });
-  const id = await addPdfFiles([f], { docName: name, projectName: 'Blank plan', blank: { size: o.size, orient: land ? 'land' : 'port', ...(o.size === 'custom' ? { cw: +o.cw, ch: +o.ch } : {}) }, scale: sc ? { ftPerPt: sc.ftPerPt, label: sc.label } : null, toast: `${name} added${sc ? ' · scale ' + sc.label : ''}` });
+  const id = await addPdfFiles([f], { docName: name, projectName: o.projectName || 'Blank plan', blank: { size: o.size, orient: land ? 'land' : 'port', ...(o.size === 'custom' ? { cw: +o.cw, ch: +o.ch } : {}) }, scale: sc ? { ftPerPt: sc.ftPerPt, label: sc.label } : null, toast: `${name} added${sc ? ' · scale ' + sc.label : ''}` });
+  if (id && o.pageName) { S.project.pageNames ||= {}; (S.project.pageNames[id] ||= {})[1] = String(o.pageName).trim().slice(0, 80); touch(); setNavLabel(); markThumb(); }
   if (id) { updateScaleLabel(); renderOverlay(); refreshPanel(); }
   return id;
 }
@@ -357,14 +358,21 @@ function bindSizeBits(root, pre, on) {
 }
 function blankFormHTML(pre) {
   const o = blankOpts();
-  return `<div class="fxRow blankf">${sizeBits(pre, o)}
+  const nextN = (S.project?.docs || []).filter(d => d.blank).length + 1;
+  return `<div class="fxRow blankf">${S.project ? '' : `<label class="sg"><span>Project name</span><input id="${pre}Pj" placeholder="e.g. Smith residence" maxlength="80" autocomplete="off" style="width:170px" title="Name the new project this page starts"></label>`}<label class="sg"><span>Page name</span><input id="${pre}Nm" placeholder="Blank page ${nextN}" maxlength="80" autocomplete="off" style="width:150px" title="Optional, e.g. A-101 Floor Plan"></label>${sizeBits(pre, o)}
     <select id="${pre}Sc" title="Sheet scale (set automatically)">${BLANK_SCALES.map(s => `<option value='${s}' ${o.scale === s ? 'selected' : ''}>${s} = 1'-0"</option>`).join('')}<option value="" ${o.scale === '' ? 'selected' : ''}>No scale</option></select>
     <button class="accent${pre === 'eb' ? ' big' : ' small'}" id="${pre}Go">Blank page…</button></div>`;
 }
 function bindBlankForm(root, pre) {
   const g = () => { const o = { ...blankOpts(), ...readSizeBits(root, pre), scale: root.querySelector('#' + pre + 'Sc').value }; if (!(o.cw > 0)) o.cw = blankOpts().cw; if (!(o.ch > 0)) o.ch = blankOpts().ch; return o; };
   bindSizeBits(root, pre, () => { UI.blank = g(); saveUI(); }); root.querySelector('#' + pre + 'Sc').onchange = () => { UI.blank = g(); saveUI(); };
-  root.querySelector('#' + pre + 'Go').onclick = async () => { const o = g(); UI.blank = o; saveUI(); await addBlankPage(o); };
+  root.querySelector('#' + pre + 'Go').onclick = async () => {
+    const o = g(); UI.blank = o; saveUI();
+    const pj = root.querySelector('#' + pre + 'Pj'), nm = root.querySelector('#' + pre + 'Nm');
+    if (pj && !S.project && !pj.value.trim()) { pj.classList.add('bad'); pj.focus(); return toast('Name your project first'); }
+    await addBlankPage({ ...o, projectName: pj?.value.trim() || undefined, pageName: nm?.value.trim() || '' });
+  };
+  for (const s of ['Pj', 'Nm']) { const el = root.querySelector('#' + pre + s); if (el) el.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); root.querySelector('#' + pre + 'Go').click(); } }; }
 }
 // v1.7.1: change an existing blank page's sheet size. The page PDF is rebuilt; markups keep their place measured from the
 // sheet's top-left corner (same scale), so nothing moves on the drawing.
@@ -497,6 +505,46 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) flush
 window.addEventListener('pagehide', () => flush());
 async function saveProduct(p) { await DB.put('products', p); }
 
+/* ---------- v1.8.3: project label, page names, inline rename ---------- */
+let hadProj = false;
+function setProjName(n) { $('#projName').textContent = n || 'No project'; $('#btnProjects').classList.toggle('none', !n); $('#btnProjects').title = n ? `Project: ${n} · open, create, rename or back up projects` : 'Projects: create or open one'; }
+const pageName = (d, n, P = S.project) => P?.pageNames?.[d]?.[n] || '';
+const pageLabelOf = (d, n, P = S.project) => pageName(d, n, P) || `Page ${n}`;
+function setPageName(d, n, v) {
+  const P = S.project; if (!P || !d) return; v = String(v || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  if (/^page \d+$/i.test(v) && +v.replace(/\D/g, '') === +n) v = '';   // typing the default back clears the custom name
+  P.pageNames ||= {}; const m = P.pageNames[d] ||= {};
+  if (v) m[n] = v; else { delete m[n]; if (!Object.keys(m).length) delete P.pageNames[d]; }
+  touch(); markThumb(); setNavLabel(); refreshPanel();
+  if (v) toast(`Page ${n} named: ${v}`);
+}
+function setNavLabel() {
+  const d = curDoc(), N = d?.pages || S.page && S.docs.get(S.docId)?.numPages || 1, n = S.pageNum, nm = S.docId ? pageName(S.docId, n) : '';
+  const F = $('#prFn'); if (F) F.textContent = drawingTitle(UI.prAll || !S.page ? '' : pageLabelOf(S.docId, n));
+  const L = $('#pageLabel'); if (L.querySelector('input')) return;
+  L.textContent = nm ? `${nm} · ${n}/${N}` : `Page ${n} / ${N}`; L.title = `${nm || 'Page ' + n}: double-click or ✎ to rename`;
+}
+function inlineRename(host, cur, ph, onSave) {   // swaps host's contents for a text box; Enter / blur saves, Esc cancels
+  if (host.querySelector('input.pgin')) return;
+  const prev = host.innerHTML; host.innerHTML = '<input class="pgin" maxlength="80" autocomplete="off" aria-label="Page name">';
+  const i = host.firstChild; i.value = cur; i.placeholder = ph; let done = false;
+  const fin = ok => { if (done) return; done = true; const v = i.value; host.innerHTML = prev; if (ok && v.trim() !== cur) onSave(v); else { markThumb(); setNavLabel(); } };
+  i.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); fin(true); } else if (e.key === 'Escape') { e.preventDefault(); fin(false); } };
+  i.onblur = () => fin(true);
+  for (const t of ['click', 'pointerdown', 'pointerup', 'dblclick', 'keyup']) i.addEventListener(t, e => e.stopPropagation());
+  i.focus(); i.select();
+}
+function renamePage(d, n, host) { inlineRename(host, pageName(d, n), `Page ${n}`, v => setPageName(d, n, v)); }
+function newProjForm(host) {   // inline "+ New project" row (no popup)
+  if (!host) return; if (host.firstChild) { host.querySelector('input')?.focus(); return; }
+  host.innerHTML = '<div class="npRow"><input class="npIn" placeholder="Project name, e.g. Smith residence" maxlength="80" autocomplete="off" aria-label="New project name"><button class="small accent npGo">Create</button><button class="small npX" title="Cancel">✕</button></div>';
+  const i = host.querySelector('input'), close = () => { host.innerHTML = ''; };
+  const go = async () => { const n = i.value.trim(); if (!n) { i.classList.add('bad'); i.focus(); return toast('Type a name for the new project'); } close(); await createProject(n); toast(`Project “${n}” created · add a PDF or a blank page`); };
+  host.querySelector('.npGo').onclick = go; host.querySelector('.npX').onclick = close;
+  i.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); go(); } if (e.key === 'Escape') close(); };
+  i.focus();
+}
+
 /* ---------- projects ---------- */
 function newProjectObj(name) {
   return { id: uid(), name, created: Date.now(), updated: Date.now(), docs: [], markups: [], scales: {}, checklist: [], manual: [], settings: { markupPct: 0, taxPct: 0, showPerim: true }, lastDoc: null, lastPage: 1 };
@@ -511,7 +559,7 @@ async function openProject(id) {
   for (const d of S.docs.values()) d.destroy?.();
   S.docs.clear(); S.project = p; S.undo = []; S.redo = []; S.selId = null; S.drawing = null; S.countId = null; S.page = null;
   await DB.put('meta', { id: 'last', projectId: id });
-  $('#projName').textContent = p.name;
+  setProjName(p.name);
   const doc = p.docs.find(d => d.id === p.lastDoc) || p.docs[0];
   if (doc) await showPage(doc.id, p.lastPage || 1); else clearViewer();
   refreshDocSelect(); renderThumbs(); refreshAll();
@@ -520,7 +568,7 @@ async function deleteProject(id) {
   const p = await DB.get('projects', id); if (!p) return;
   for (const d of p.docs) await DB.del('pdfs', d.id);
   await DB.del('projects', id);
-  if (S.project?.id === id) { S.project = null; clearViewer(); const rest = (await DB.all('projects')).sort((a, b) => b.updated - a.updated); if (rest[0]) await openProject(rest[0].id); else { $('#projName').textContent = 'No project'; refreshDocSelect(); renderThumbs(); refreshAll(); } }
+  if (S.project?.id === id) { S.project = null; clearViewer(); const rest = (await DB.all('projects')).sort((a, b) => b.updated - a.updated); if (rest[0]) await openProject(rest[0].id); else { setProjName(null); refreshDocSelect(); renderThumbs(); refreshAll(); } }
 }
 async function projectsModal() {
   await flush();
@@ -537,7 +585,7 @@ async function projectsModal() {
       const act = e.target.closest('[data-act]')?.dataset.act, id = r.dataset.id; if (!act) return;
       const p = list.find(x => x.id === id);
       if (act === 'open') { close(); await openProject(id); }
-      if (act === 'rename') { const n = await askText('Rename project', 'Project name', p.name); if (n) { if (S.project?.id === id) { S.project.name = n; await flush(); $('#projName').textContent = n; refreshAll(); } else { p.name = n; await DB.put('projects', p); } } projectsModal(); }
+      if (act === 'rename') { const n = await askText('Rename project', 'Project name', p.name); if (n) { if (S.project?.id === id) { S.project.name = n; await flush(); setProjName(n); refreshAll(); } else { p.name = n; await DB.put('projects', p); } } projectsModal(); }
       if (act === 'backup') { close(); await backupProject(id); }
       if (act === 'delete') { if (await askConfirm('Delete project?', `Delete <b>${esc(p.name)}</b> and its PDFs from this device? This can't be undone. (Make a backup first if you might need it.)`)) { await deleteProject(id); toast('Project deleted'); } projectsModal(); }
     });
@@ -575,6 +623,7 @@ async function removeCurrentPdf() {
   if (!await askConfirm('Remove PDF?', `Remove <b>${esc(d.name)}</b> from this project${n ? ` along with its ${n} markups` : ''}?`, 'Remove')) return;
   P.markups = P.markups.filter(m => m.docId !== d.id); P.docs = P.docs.filter(x => x.id !== d.id);
   for (const k of Object.keys(P.scales)) if (k.startsWith(d.id + ':')) delete P.scales[k];
+  if (P.pageNames) delete P.pageNames[d.id];
   S.docs.get(d.id)?.destroy?.(); S.docs.delete(d.id); await DB.del('pdfs', d.id); S.undo = []; S.redo = [];
   await flush(); refreshDocSelect();
   if (P.docs[0]) await showPage(P.docs[0].id, 1); else clearViewer();
@@ -612,7 +661,7 @@ async function showPage(docId, pageNum, fit = true) {
   detC.style.display = 'none'; detState = null;
   if (S.project) { S.project.lastDoc = docId; S.project.lastPage = pageNum; touch(); }
   $('#docSelect').value = docId;
-  $('#pageLabel').textContent = `Page ${pageNum} / ${pdf.numPages}`;
+  setNavLabel();
   if (fit) fitPage(); else applyT();
   renderOverlay(); refreshPanel(); updateScaleLabel(); markThumb();
   await renderBase(tok);
@@ -1229,8 +1278,11 @@ function renderThumbs() {
     } catch (e) { if (e?.name !== 'RenderingCancelledException') console.warn(e); }
   }), { root: box, rootMargin: '200px' });
   for (let i = 1; i <= doc.pages; i++) {
-    const b = document.createElement('button'); b.className = 'thumb'; b.dataset.page = i;
-    b.innerHTML = `<div class="tl"></div>`; b.onclick = () => showPage(docId, i);
+    const b = document.createElement('div'); b.className = 'thumb'; b.dataset.page = i; b.tabIndex = 0; b.setAttribute('role', 'button');
+    b.innerHTML = `<div class="tl"></div>`;
+    b.onclick = e => { if (e.target.closest('input')) return; if (e.target.closest('.tren')) return renamePage(docId, i, b.querySelector('.tl')); showPage(docId, i); };
+    b.ondblclick = e => { if (!e.target.closest('canvas, input, .tren')) { e.preventDefault(); renamePage(docId, i, b.querySelector('.tl')); } };
+    b.onkeydown = e => { if (e.target !== b) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showPage(docId, i); } if (e.key === 'F2') { e.preventDefault(); renamePage(docId, i, b.querySelector('.tl')); } };
     box.appendChild(b); thumbObs.observe(b);
   }
   markThumb();
@@ -1239,7 +1291,9 @@ function markThumb() {
   const counts = {}; for (const m of S.project?.markups || []) if (m.docId === S.docId) counts[m.page] = (counts[m.page] || 0) + 1;
   $$('#thumbs .thumb').forEach(b => {
     const p = +b.dataset.page, on = p === S.pageNum; b.classList.toggle('on', on);
-    b.querySelector('.tl').innerHTML = `Page ${p}${counts[p] ? ` · <b>${counts[p]}</b>` : ''}${S.project?.scales[pageKey(S.docId, p)] ? '' : ' · <span title="No scale">no scale</span>'}`;
+    const tl = b.querySelector('.tl'); if (tl.querySelector('input')) return;
+    const h = `<span class="pgnm" title="Double-click to rename">${esc(pageLabelOf(S.docId, p))}</span><span class="tren" role="button" tabindex="0" title="Rename this page" aria-label="Rename page ${p}">✎</span><br><span class="pgmeta">${pageName(S.docId, p) ? `p.${p}` : ''}${counts[p] ? ` · <b>${counts[p]}</b>` : ''}${S.project?.scales[pageKey(S.docId, p)] ? '' : ' · <span title="No scale">no scale</span>'}</span>`;
+    if (tl.dataset.h !== h) { tl.innerHTML = h; tl.dataset.h = h; const pm = tl.querySelector('.pgmeta'); if (pm) pm.innerHTML = pm.innerHTML.replace(/^ · /, ''); }
     if (on && !b.dataset.seen) { b.scrollIntoView({ block: 'nearest' }); }
   });
 }
@@ -1267,8 +1321,8 @@ function refreshActiveProduct() {
 /* ======================= RIGHT PANEL ======================= */
 function refreshPanel() {
   const list = $('#markupList'), tot = $('#pageTotals'), selBox = $('#selBox');
-  if (!S.project || !S.page) { list.innerHTML = '<p class="muted small">No page open.</p>'; tot.innerHTML = ''; selBox.classList.add('hidden'); $('#pageCount').textContent = ''; $('#selBar').classList.add('hidden'); renderDock(); return; }
-  const ms = pageMarkups(); $('#pageCount').textContent = ms.length ? `(${ms.length})` : '';
+  if (!S.project || !S.page) { list.innerHTML = '<p class="muted small">No page open.</p>'; tot.innerHTML = ''; selBox.classList.add('hidden'); $('#pageCount').textContent = ''; $('#pageNameHd').textContent = ''; $('#selBar').classList.add('hidden'); renderDock(); return; }
+  const ms = pageMarkups(); $('#pageCount').textContent = ms.length ? `(${ms.length})` : ''; $('#pageNameHd').textContent = pageLabelOf(S.docId, S.pageNum);
   for (const id of [...S.sel]) if (!ms.some(m => m.id === id)) S.sel.delete(id);
   if (S._pri && !S.sel.has(S._pri)) S._pri = [...S.sel].pop() || null;
   refreshSelBar(); refreshActiveProduct();
@@ -1450,12 +1504,12 @@ function exportEstimateCsv() {
 }
 function loadXlsx() { return window.XLSX ? Promise.resolve() : new Promise((res, rej) => { const s = document.createElement('script'); s.src = './vendor/xlsx.mini.min.js'; s.onload = res; s.onerror = rej; document.head.appendChild(s); }); }
 function markupRows() {
-  const rows = [['PDF', 'Page', 'Type', 'Product', 'Note', 'Measured', 'Unit', 'Value']];
+  const rows = [['PDF', 'Page', 'Page name', 'Type', 'Product', 'Note', 'Measured', 'Unit', 'Value']];
   for (const m of S.project.markups) {
     if (!isQty(m)) continue;
     const p = prodById(m.productId), g = geo(m), doc = S.project.docs.find(d => d.id === m.docId);
     const q = p ? qtyFor(m, p) : (m.type === 'count' ? g.ea : m.type === 'area' ? g.sf : (g.sf ?? g.lf));
-    rows.push([doc?.name || '', m.page, m.type, p?.name || '(unassigned)', m.label || '', q == null ? '' : r4(q), p ? p.unit : nativeUnit(m), valueText(m)]);
+    rows.push([doc?.name || '', m.page, pageName(m.docId, m.page), m.type, p?.name || '(unassigned)', m.label || '', q == null ? '' : r4(q), p ? p.unit : nativeUnit(m), valueText(m)]);
   }
   return rows;
 }
@@ -1473,15 +1527,26 @@ async function exportXlsx() {
 const takeoffTitle = n => !n ? 'Takeoff' : /takeoff$/i.test(n) ? n : n + ' Takeoff';
 const pdfTitle = s => String(s || '').replace(/[\/\\]+/g, '-').replace(/[:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').replace(/^[\s.-]+|[\s.]+$/g, '').slice(0, 120).trim();
 let printTitleTimer = 0, appTitle = null;
-function setPrintTitle(suffix = '') {   // the marked-up drawing prints as "<takeoff name> Takeoff - Drawing"
+function setPrintTitle(pageLbl = '') {   // v1.8.3: "<project> Takeoff"; one printed sheet: "<project> - <page name> Takeoff"
   if (appTitle === null) appTitle = document.title;
-  const n = pdfTitle(S.project?.name);   // file name: "<takeoff name> Takeoff", or just "Takeoff"
-  document.title = takeoffTitle(n) + suffix;
+  const n = pdfTitle(S.project?.name), pl = pdfTitle(pageLbl);   // file name: "<takeoff name> Takeoff", or just "Takeoff"
+  document.title = pl ? takeoffTitle(pdfTitle((n || 'Takeoff') + ' - ' + pl)) : takeoffTitle(n);
   clearTimeout(printTitleTimer); printTitleTimer = setTimeout(restorePrintTitle, 60000);   // fallback if afterprint never fires
 }
 function restorePrintTitle() { clearTimeout(printTitleTimer); if (appTitle !== null) { document.title = appTitle; appTitle = null; } }
-addEventListener('beforeprint', () => { if (S.project) setPrintTitle($('#printArea').classList.contains('drawing') ? ' - Drawing' : ''); });   // also covers the browser's own Print menu / Ctrl+P
+addEventListener('beforeprint', () => { if (S.project) setPrintTitle($('#printArea').classList.contains('drawing') ? $('#printArea').dataset.pl || '' : ''); });   // also covers the browser's own Print menu / Ctrl+P
 addEventListener('afterprint', () => setTimeout(restorePrintTitle, 500));
+function sheetsHTML() {   // v1.8.3: estimate printout grouped by sheet, using the page names
+  const order = S.project.docs.map(d => d.id), seen = new Map();
+  for (const m of S.project.markups) if (order.includes(m.docId)) seen.set(m.docId + ':' + m.page, [m.docId, m.page]);
+  const pages = [...seen.values()].sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]) || a[1] - b[1]);
+  const secs = pages.map(([d, pn]) => {
+    const agg = pageAgg(S.project.markups.filter(m => m.docId === d && m.page === pn)); if (!agg.length) return '';
+    const doc = S.project.docs.find(x => x.id === d);
+    return `<section class="pcat psheet"><h3 class="pch">${esc(pageLabelOf(d, pn))} <span class="pchm">${esc(doc?.name || '')} · page ${pn}</span></h3><table><thead><tr><th>Item</th><th>Unit</th><th class="n">Qty (before waste)</th></tr></thead><tbody>${agg.map(a => `<tr><td>${esc(a.name)}</td><td>${esc(a.unit)}</td><td class="n">${fmtQty(a.q, a.unit)}</td></tr>`).join('')}</tbody></table></section>`;
+  }).join('');
+  return secs ? `<h2 class="psh">Quantities by sheet</h2>${secs}` : '';
+}
 function printSummary() {
   const E = computeEstimate(); if (!E) return; const P = E.show;
   // v1.5: one block per category (same grouping as the on-screen estimate), grand total at the end
@@ -1502,10 +1567,11 @@ function printSummary() {
     const sub = `<tr class="subt"><td colspan="2">${esc(g.label)} subtotal</td><td class="n">${qtyTxt}</td>${P ? `<td class="n"></td><td class="n">${m$(mat)}</td><td class="n">${m$(lab)}</td><td class="n">${m$(tot)}</td>` : ''}</tr>`;
     return `<section class="pcat"><h3 class="pch">${esc(g.label)}</h3><table>${head}<tbody>${rows}${SUBS ? sub : ''}</tbody></table></section>`;
   }).join('');
-  setPrintMode('summary');
+  setPrintMode('summary'); delete $('#printArea').dataset.pl;
   $('#printArea').innerHTML = `<h1>${esc(S.project.name)} — ${P ? 'Estimate' : 'Quantities'}</h1><div>${new Date().toLocaleDateString()}</div><br>
     ${body || '<p>No items yet.</p>'}
     ${P ? `<div class="tot"><div><span>Material</span><span>${fmt$(E.mat)}</span></div><div><span>Labor</span><span>${fmt$(E.labor)}</span></div><div><span>Markup ${E.markupPct}%</span><span>${fmt$(E.markup)}</span></div><div><span>Tax ${E.taxPct}%</span><span>${fmt$(E.tax)}</span></div><div class="g"><span>Grand total</span><span>${fmt$(E.grand)}</span></div></div>` : ''}
+    ${sheetsHTML()}
     ${S.project.checklist.length ? `<h3>Checklist</h3><table>${S.project.checklist.map(c => `<tr><td>${c.done ? '☑' : '☐'} ${esc(c.text)}${c.notes ? `<br><small>${esc(c.notes)}</small>` : ''}</td></tr>`).join('')}</table>` : ''}`;
   setPrintTitle(); window.print();
 }
@@ -1649,6 +1715,7 @@ async function restoreBackup(file) {
   p.markups = p.markups.map(m => ({ ...m, docId: docMap[m.docId] || m.docId }));
   const sc = {}; for (const [k, v] of Object.entries(p.scales || {})) { const [d, pg] = k.split(':'); sc[(docMap[d] || d) + ':' + pg] = v; } p.scales = sc;
   if (p.lastDoc) p.lastDoc = docMap[p.lastDoc] || p.lastDoc;
+  if (p.pageNames) { const pn = {}; for (const [d, v] of Object.entries(p.pageNames)) pn[docMap[d] || d] = v; p.pageNames = pn; }
   for (const a of o.assemblies || []) if (!asmById(a.id)) { S.asms.push(a); saveAsms(); }
   for (const f of o.fonts || []) if (!ufontById(f.id)) { try { const { dataURL, ...rest } = f, nf = { ...rest, data: await (await fetch(dataURL)).arrayBuffer() }; await registerFont(nf); UFONTS.push(nf); await saveFonts(); } catch (e) { console.warn('font restore', e); } }
   let addedP = 0; for (const pr of o.products || []) if (!prodById(pr.id)) { await saveProduct(pr); S.products.push(pr); addedP++; }
@@ -1662,10 +1729,14 @@ function switchView(v) {
   if (v === 'estimate') renderEstimate(); if (v === 'products') renderProducts(); if (v === 'checklist') renderChecklist();
   if (v === 'plans' && S.page) { scheduleDetail(); }
 }
-function refreshAll() { $('#projName').textContent = S.project?.name || 'No project'; refreshActiveProduct(); refreshPanel(); updateScaleLabel(); renderOverlay(); if (S.view !== 'plans') switchView(S.view); }
+function refreshAll() { setProjName(S.project?.name); if (!!S.project !== hadProj) { hadProj = !!S.project; mountEmptyBlank(); } refreshActiveProduct(); refreshPanel(); updateScaleLabel(); renderOverlay(); if (S.view !== 'plans') switchView(S.view); }
 $$('#tabs button').forEach(b => b.onclick = () => switchView(b.dataset.view));
 $$('.tool').forEach(b => b.onclick = () => setTool(b.dataset.tool));
 $('#btnProjects').onclick = projectsModal;
+$('#btnNewProj').onclick = () => newProjForm($('#newProjHost'));
+$('#btnEmptyNewProj').onclick = () => newProjForm($('#emptyNewProj'));
+$('#pageRename').onclick = () => S.page && renamePage(S.docId, S.pageNum, $('#pageLabel'));
+$('#pageLabel').ondblclick = () => S.page && renamePage(S.docId, S.pageNum, $('#pageLabel'));
 $('#btnAddPdf').onclick = $('#btnEmptyAdd').onclick = () => $('#filePdf').click();
 $('#btnAddBlank').onclick = () => { setDockTab('draw'); setTimeout(() => $('#bpSize')?.focus(), 30); };
 $('#filePdf').onchange = async e => { await addPdfFiles(e.target.files); e.target.value = ''; };
@@ -2355,7 +2426,7 @@ function breakdownHTML(m, a) {
     <p class="muted small">${esc(a.note || ASM_NOTE)}. Edit components and prices with nothing selected (Assembly tab → library).</p>`;
 }
 function dockAsm(body) {
-  if (!S.project) { body.innerHTML = '<p class="muted small">Open a project first.</p>'; return; }
+  if (!S.project) { S.asmView = 'lib'; return asmLibPanel(body, null); }   // v1.8.3: the library works with no project open
   const q = selMarks().filter(x => isQty(x) && x.type !== 'count'), m = q.find(x => x.id === S.selId) || q[0];
   if (m && S.asmView !== 'lib') return asmMarkPanel(body, m);
   asmLibPanel(body, m);
@@ -2363,7 +2434,7 @@ function dockAsm(body) {
 function asmMarkPanel(body, m) {
   const A = asmOf(m), kinds = m.type === 'area' ? ['ceiling'] : m.wall ? ['wall'] : ['soffit'], P = m.asmP || {};
   let h = `<div class="dgrid"><div class="dcol">
-    <div class="dhead"><b>Assembly</b><span class="muted small">${esc(markName(m))}</span><button class="small" id="amLib">Wall type library</button></div>
+    <div class="dhead"><b>Assembly</b><span class="muted small">${esc(markName(m))}</span><button class="small" id="amLib" title="Browse, create and edit wall, ceiling and soffit assemblies">Assembly library</button></div>
     <label class="field"><span>${m.type === 'area' ? 'Ceiling assembly' : m.wall ? 'Wall type' : 'Soffit assembly'}</span><select id="amSel"><option value="">— None —</option>${asmOpts(kinds, m.asm)}</select></label>`;
   if (!A && !m.wall && m.type === 'length') h += `<p class="muted small">Soffits are lengths. Walls have their own wall types; draw them with the Wall tool.</p>`;
   if (A) {
@@ -2393,6 +2464,12 @@ function asmMarkPanel(body, m) {
   });
   const ao = body.querySelector('#amAddOp'); if (ao) ao.onclick = () => { const L = polyLen(m.pts); let acc = 0, at = m.pts[0]; for (let i = 1; i < m.pts.length; i++) { const d = dist(m.pts[i - 1], m.pts[i]); if (acc + d >= L / 2) { const t = (L / 2 - acc) / (d || 1); at = [m.pts[i - 1][0] + (m.pts[i][0] - m.pts[i - 1][0]) * t, m.pts[i - 1][1] + (m.pts[i][1] - m.pts[i - 1][1]) * t]; break; } acc += d; } const sel = m.id; placeOpening(at, m); S.selId = sel; renderOverlay(); refreshPanel(); renderDock(true); };
 }
+function newAsm(kind) {   // v1.8.3: a blank, user-owned assembly of the given kind
+  const base = { id: 'asm-' + uid(), kind, builtin: false, note: 'Custom assembly', created: Date.now(), oc: 16, comps: [] };
+  if (kind === 'wall') return { ...base, name: 'New wall type', sides: 2, h: 9, wall: { preset: 'custom', core: 3.5, gwb: 0.5 }, style: { hatch: 'stud' } };
+  if (kind === 'ceiling') return { ...base, name: 'New ceiling type', sides: 1, style: {} };
+  return { ...base, kind: 'soffit', name: 'New soffit type', sides: 1, w: 2, d: 2, style: { hatch: 'stud' } };
+}
 function asmLibPanel(body, selM) {
   const A = asmById(S.asmEdit) || S.asms[0]; if (!A) { body.innerHTML = '<p class="muted small">No assemblies.</p>'; return; } S.asmEdit = A.id;
   const groups = Object.keys(ASM_KINDS).map(k => `<optgroup label="${ASM_KINDS[k]}">${asmOpts([k], A.id)}</optgroup>`).join('');
@@ -2400,15 +2477,22 @@ function asmLibPanel(body, selM) {
   const inp = (k, label, v, w = 60, tip = '') => `<label class="sg"><span>${label}</span><input data-af="${k}" value="${esc(String(v ?? ''))}" style="width:${w}px" title="${tip}"></label>`;
   const sample = { LF: 1, H: 1, W: 1, D: 1, SIDES: 1, AREA: 1, PERIM: 1, OPEN: 1, OPENW: 1, NOPEN: 1, NDOOR: 1, NWIN: 1, NET: 1, BOARD: 1, CORNERS: 1, OUTC: 1, BEADLF: 1, OC: 16 };
   const rows = A.comps.map((c, i) => `<tr data-ci="${i}"><td><input type="checkbox" data-cf="on" ${c.on !== false ? 'checked' : ''}></td><td><input data-cf="name" value="${esc(c.name)}" style="width:180px"></td><td><input data-cf="unit" value="${esc(c.unit)}" style="width:52px"></td><td><input data-cf="f" class="fxin${isFinite(asmCompQty(c, sample)) ? '' : ' bad'}" value="${esc(c.f)}" style="width:210px"></td><td><input data-cf="price" inputmode="decimal" value="${c.price}" style="width:64px"></td><td><input data-cf="labor" inputmode="decimal" value="${c.labor}" style="width:56px"></td><td><input data-cf="waste" inputmode="decimal" value="${c.waste}" style="width:44px"></td><td><input type="checkbox" data-cf="round" ${c.round ? 'checked' : ''}></td><td><button class="small danger" data-cdel title="Remove">✕</button></td></tr>`).join('');
-  body.innerHTML = `<div class="dhead"><b>Assemblies</b><select id="alSel">${groups}</select>${selM ? '<button class="small" id="alBack">← Selected markup</button>' : ''}<button class="small" id="alDup">Duplicate</button>${A.builtin ? '<button class="small" id="alReset" title="Put this template back to the example values">Reset to example</button>' : '<button class="small danger" id="alDel">Delete</button>'}<button class="small accent" id="alUse">Use for next ${useK[2]}</button></div>
-    <p class="small warnnote">${esc(ASM_NOTE)}. The quantities are rules of thumb to start from, not a code-checked design.</p>
+  body.innerHTML = `<div class="dhead"><b>Assembly library</b><select id="alSel" title="Pick an assembly to view or edit">${groups}</select>${selM ? '<button class="small" id="alBack">← Selected markup</button>' : ''}<span class="alNewW"><button class="small" id="alNew" aria-expanded="false" title="Create a new, empty assembly">+ New</button><span class="alNewK hidden" role="group" aria-label="New assembly kind">${Object.entries(ASM_KINDS).map(([k, n]) => `<button class="small" data-alnew="${k}">${k === 'wall' ? 'Wall type' : n}</button>`).join('')}</span></span><button class="small" id="alDup" title="Copy this assembly to edit">Duplicate</button>${A.builtin ? '<button class="small" id="alReset" title="Put this template back to the example values">Reset to example</button>' : '<button class="small danger" id="alDel">Delete</button>'}<button class="small accent" id="alUse">Use for next ${useK[2]}</button></div>
+    ${A.builtin ? `<p class="small warnnote">${esc(ASM_NOTE)}. The quantities are rules of thumb to start from, not a code-checked design.</p>` : `<p class="muted small">Your own ${A.kind === 'wall' ? 'wall type' : A.kind}: add components below, each with a quantity formula, price, labor and waste.</p>`}
     <div class="fxRow asmMeta">${inp('name', 'Name', A.name, 300)}<span class="badge">${ASM_KINDS[A.kind]}</span>${A.kind !== 'ceiling' ? inp('sides', A.kind === 'soffit' ? 'Drops boarded' : 'Sides boarded', A.sides, 44) : ''}${inp('oc', 'OC in', A.oc, 44, 'Stud / framing spacing in inches')}${A.kind === 'wall' ? inp('h', 'Default height ft', A.h, 52) + inp('core', 'Core in', A.wall?.core, 52) + inp('gwb', 'Board each side in', A.wall?.gwb, 52) : ''}${A.kind === 'soffit' ? inp('w', 'Width ft', A.w, 48) + inp('d', 'Drop ft', A.d, 48) : ''}
       ${inp('lw', 'Line weight pt', A.style?.width ?? '', 48, 'Blank = default')}${inp('hs', 'Hatch scale ×', A.style?.hscale ?? '', 48, 'Blank = 1')}<label class="sg"><span>Hatch</span><select data-af="hatch">${Object.entries(HATCHES).concat(Object.entries(ARCH_PATS).map(([k, p]) => [k, p.n || k])).map(([k, n]) => `<option value="${k}" ${(A.style?.hatch || 'none') === k ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label></div>
-    <div class="tscroll"><table class="fxT asmEd"><thead><tr><th>On</th><th>Item</th><th>Unit</th><th>Qty formula ƒx</th><th>Price $</th><th>Labor $</th><th>Waste %</th><th title="Round the quantity with waste up to whole units">Whole</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="tscroll"><table class="fxT asmEd"><thead><tr><th>On</th><th>Item</th><th>Unit</th><th>Qty formula ƒx</th><th>Price $</th><th>Labor $</th><th>Waste %</th><th title="Round the quantity with waste up to whole units">Whole</th><th></th></tr></thead><tbody>${rows || `<tr class="asmEmpty"><td colspan="9" class="muted small">No components yet. Tap <b>+ Component</b> to add the first one.</td></tr>`}</tbody></table></div>
     <div class="fxRow"><button class="small" id="alAddC">+ Component</button><span class="muted small">Variables: ${esc(ASM_VARS_HELP[A.kind])}. Functions: ceil, round, floor, min, max.</span></div>`;
   const save = (rerender) => { saveAsms(); renderOverlay(); refreshPanel(); if (S.view === 'estimate') renderEstimate(); if (rerender) renderDock(true); };
   body.querySelector('#alSel').onchange = e => { S.asmEdit = e.target.value; renderDock(true); };
   const bk = body.querySelector('#alBack'); if (bk) bk.onclick = () => { S.asmView = 'mark'; renderDock(true); };
+  const nb = body.querySelector('#alNew'), nk = body.querySelector('.alNewK');
+  nb.onclick = () => { const open = nk.classList.toggle('hidden') === false; nb.setAttribute('aria-expanded', String(open)); nb.classList.toggle('on', open); };
+  body.querySelectorAll('[data-alnew]').forEach(b => b.onclick = () => {
+    const a = newAsm(b.dataset.alnew); S.asms.push(a); S.asmEdit = a.id; S.asmView = 'lib'; save(true);
+    const nm = $('#dockBody [data-af=name]') || document.querySelector('[data-af=name]'); if (nm) { nm.focus(); nm.select(); }
+    toast(`New ${ASM_KINDS[a.kind].toLowerCase()} created: name it, then add components`);
+  });
   body.querySelector('#alDup').onclick = () => { const c = JSON.parse(JSON.stringify(A)); c.id = 'asm-' + uid(); c.builtin = false; c.name = A.name + ' (copy)'; S.asms.push(c); S.asmEdit = c.id; save(true); toast('Duplicated: edit the copy'); };
   const rs = body.querySelector('#alReset'); if (rs) rs.onclick = () => { const d = ASM_DEFAULTS().find(x => x.id === A.id); if (d) { S.asms[S.asms.indexOf(A)] = d; save(true); toast('Reset to the example values'); } };
   const dl = body.querySelector('#alDel'); if (dl) dl.onclick = () => { const n = (S.project?.markups || []).filter(m => m.asm === A.id).length; if (n && !body.querySelector('#alDel').dataset.armed) { body.querySelector('#alDel').dataset.armed = 1; body.querySelector('#alDel').textContent = `Delete (used by ${n})?`; return; } S.asms = S.asms.filter(x => x !== A); S.asmEdit = null; save(true); };
@@ -2718,7 +2802,7 @@ function dockFx(body) {
       body.querySelectorAll('[data-ins]').forEach(b => b.onclick = () => { const s = inp.selectionStart ?? inp.value.length; inp.value = inp.value.slice(0, s) + b.dataset.ins + inp.value.slice(inp.selectionEnd ?? s); inp.focus(); inp.dispatchEvent(new Event('input')); });
     } else body.querySelector('#fxVars').innerHTML = '<span class="muted small">No markups use this product yet. Draw one to see live results.</span>';
     let tot = 0, n = 0, h = '';
-    rows.forEach((x, i) => { const q = qtyFor(x, p); if (q != null) tot += q; n++; if (i < 60) h += `<tr class="${S.sel.has(x.id) ? 'on' : ''}" data-mid="${x.id}"><td>${x.docId === S.docId && x.page === S.pageNum ? 'This page' : 'Pg ' + x.page}</td><td>${esc(x.label || markName(x))}${x.formula ? ' <span class="badge" title="Has its own formula">ƒx</span>' : ''}</td><td>${esc(valueText(x).split(' · ')[0])}</td><td class="n"><b>${fmtQty(q, p.unit)}</b></td></tr>`; });
+    rows.forEach((x, i) => { const q = qtyFor(x, p); if (q != null) tot += q; n++; if (i < 60) h += `<tr class="${S.sel.has(x.id) ? 'on' : ''}" data-mid="${x.id}"><td>${x.docId === S.docId && x.page === S.pageNum ? 'This page' : esc(pageName(x.docId, x.page) || 'Pg ' + x.page)}</td><td>${esc(x.label || markName(x))}${x.formula ? ' <span class="badge" title="Has its own formula">ƒx</span>' : ''}</td><td>${esc(valueText(x).split(' · ')[0])}</td><td class="n"><b>${fmtQty(q, p.unit)}</b></td></tr>`; });
     const w = num(p.waste);
     body.querySelector('#fxRes').innerHTML = `<table class="fxT"><thead><tr><th>Where</th><th>Markup</th><th>Measured</th><th class="n">Qty (${esc(p.unit)})</th></tr></thead><tbody>${h || '<tr><td colspan="4" class="muted">No markups yet</td></tr>'}</tbody>
       <tfoot><tr><td colspan="3">Total · ${n} markup${n === 1 ? '' : 's'}${w ? ` · with ${fmtN(w, 1)}% waste ${fmtQty(tot * (1 + w / 100), p.unit)}` : ''}</td><td class="n"><b id="fxTotal">${fmtQty(tot, p.unit)}</b></td></tr></tfoot></table>`;
@@ -2841,17 +2925,17 @@ function dockScale(body) {
 }
 function dockPrint(body) {
   const n = S.project ? new Set(S.project.markups.map(m => m.docId + ':' + m.page)).size : 0;
-  body.innerHTML = `<div class="dhead"><b>Print the marked-up drawing</b><span class="muted small">Prints (or saves as PDF) the sheet with every markup, highlight and note drawn on it. File name: <b>${esc(drawingTitle())}</b></span></div>
+  body.innerHTML = `<div class="dhead"><b>Print the marked-up drawing</b><span class="muted small">Prints (or saves as PDF) the sheet with every markup, highlight and note drawn on it. File name: <b id="prFn">${esc(drawingTitle(UI.prAll || !S.page ? '' : pageLabelOf(S.docId, S.pageNum)))}</b></span></div>
     <div class="fxRow"><label class="chk"><input type="radio" name="prW" value="page" ${UI.prAll ? '' : 'checked'}> This page</label><label class="chk"><input type="radio" name="prW" value="all" ${UI.prAll ? 'checked' : ''}> All marked pages (${n})</label>
     <label class="chk"><input type="checkbox" id="prLeg" ${UI.prLegend === false ? '' : 'checked'}> Quantity legend</label><label class="chk"><input type="checkbox" id="prGrid" ${UI.prGrid ? 'checked' : ''}> Print grid</label><button class="accent" id="prGo">🖨 Print drawing</button></div>`;
-  body.querySelectorAll('[name=prW]').forEach(r => r.onchange = () => { UI.prAll = r.value === 'all' && r.checked; saveUI(); });
+  body.querySelectorAll('[name=prW]').forEach(r => r.onchange = () => { UI.prAll = r.value === 'all' && r.checked; saveUI(); body.querySelector('#prFn').textContent = drawingTitle(UI.prAll || !S.page ? '' : pageLabelOf(S.docId, S.pageNum)); });
   body.querySelector('#prLeg').onchange = e => { UI.prLegend = e.target.checked; saveUI(); };
   body.querySelector('#prGrid').onchange = e => { UI.prGrid = e.target.checked; saveUI(); };
   body.querySelector('#prGo').onclick = () => printDrawing(!!UI.prAll);
 }
 
 /* ======================= v1.6: print the marked-up drawing ======================= */
-function drawingTitle() { return takeoffTitle(pdfTitle(S.project?.name)) + ' - Drawing'; }
+function drawingTitle(pl = '') { const n = pdfTitle(S.project?.name), p = pdfTitle(pl); return p ? takeoffTitle(pdfTitle((n || 'Takeoff') + ' - ' + p)) : takeoffTitle(n); }
 let printUrls = [];
 function setPrintMode(mode, landscape) {
   const pa = $('#printArea'); pa.classList.toggle('drawing', mode === 'drawing');
@@ -2886,7 +2970,7 @@ async function printDrawing(all = false) {
       const zP = 1.6 * 720 / Math.max(W, H);   // label pills ≈ 9 pt on a letter / tabloid sheet
       const doc = S.project.docs.find(x => x.id === d), sc = S.project.scales[pageKey(d, pn)];
       const leg = UI.prLegend === false ? [] : pageAgg(ms);
-      secs.push(`<section class="pdraw"><div class="pdHead"><b>${esc(S.project.name || 'Takeoff')}</b> · ${esc(doc?.name || '')} · page ${pn}${sc ? ' · scale ' + esc(sc.label) : ''} · ${new Date().toLocaleDateString()}</div>
+      secs.push(`<section class="pdraw"><div class="pdHead"><span class="pdPj">${esc(S.project.name || 'Takeoff')}</span><span class="pdPg">${esc(pageLabelOf(d, pn))}</span><span class="pdMeta">${esc(doc?.name || '')} · page ${pn}${doc?.pages > 1 ? ' of ' + doc.pages : ''}${sc ? ' · scale ' + esc(sc.label) : ''} · ${new Date().toLocaleDateString()}</span></div>
         <div class="pdBox"><img src="${url}" alt=""><svg class="mk" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${UI.prGrid ? gridSVG(zP, W, H, sc?.ftPerPt, `g${secs.length}-`, true) : ''}${markupsSVG(ms, zP, () => false, `p${secs.length}-`)}</svg></div>
         ${leg.length ? `<div class="pdLeg">${leg.map(a => `<span>${a.hatch ? legendSwatch(a, `p${secs.length}-`) : `<i style="background:${a.color}"></i>`}${esc(a.name)}: <b>${fmtQty(a.q, a.unit)} ${esc(a.unit)}</b></span>`).join('')}</div>` : ''}</section>`);
     } catch (e) { console.warn(e); toast('Could not render page ' + pn); }
@@ -2896,7 +2980,8 @@ async function printDrawing(all = false) {
   $('#printArea').innerHTML = secs.join('');
   await Promise.all([...$('#printArea').querySelectorAll('img')].map(i => i.decode().catch(() => { })));
   toast('Opening print…', 1200);
-  setPrintTitle(' - Drawing'); try { await document.fonts.ready; } catch { } window.print();
+  const pl = pages.length === 1 ? pageLabelOf(pages[0][0], pages[0][1]) : ''; $('#printArea').dataset.pl = pl;
+  setPrintTitle(pl); try { await document.fonts.ready; } catch { } window.print();
 }
 $('#btnPrintDrawing').onclick = () => printDrawing(false);
 $('#btnPrintDrawings').onclick = () => printDrawing(true);
