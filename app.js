@@ -3,7 +3,7 @@ import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.8.0';
+const VER = 'v1.8.1';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -785,7 +785,7 @@ const inBox = (q, b) => q[0] >= b.x0 && q[0] <= b.x1 && q[1] >= b.y0 && q[1] <= 
 const mctx = document.createElement('canvas').getContext('2d');
 function textLayout(m, st) {
   const fs = clamp(+st.fs || 16, 2, 800), pad = fs * (st.pad != null && st.pad !== '' && +st.pad >= 0 ? +st.pad : 0.35), lh = fs * 1.25, raw = String(m.text || ''), lines = (raw || ' ').split('\n');
-  mctx.font = `${st.bold ? 700 : 400} 100px system-ui, "Segoe UI", Arial, sans-serif`;
+  mctx.font = textFont(st);
   const tw = Math.max(...lines.map(l => mctx.measureText(l).width)) * fs / 100;
   const a = m.kind === 'callout' ? m.pts[1] : m.pts[0];
   return { x: a[0], y: a[1], w: Math.max(tw, fs * 2) + pad * 2, h: lines.length * lh + pad * 2, fs, pad, lh, lines, empty: !raw.trim() };
@@ -816,7 +816,8 @@ function textSVG(m, st, framed) {
   const t = textLayout(m, st), c = st.color; let h = '';
   if ((st.bg && st.bg !== 'none') || framed || st.border) h += `<rect x="${t.x}" y="${t.y}" width="${t.w}" height="${t.h}" rx="${t.fs * 0.15}" fill="${st.bg && st.bg !== 'none' ? st.bg : 'none'}"${framed || st.border ? ` stroke="${c}" stroke-width="${Math.max(+st.width || 1.5, t.fs * 0.06)}"` : ''}/>`;
   const lines = t.empty ? ['Text'] : t.lines;
-  h += `<text class="at" x="${t.x + t.pad}" y="${t.y + t.pad + t.fs * 0.92}" font-size="${t.fs}" fill="${st.tcolor || c}"${t.empty ? ' fill-opacity=".45"' : ''} font-weight="${st.bold ? 700 : 400}">${lines.map((l, i) => `<tspan x="${t.x + t.pad}"${i ? ` dy="${t.lh}"` : ''}>${esc(l) || ' '}</tspan>`).join('')}</text>`;
+  const al = st.align === 'center' || st.align === 'right' ? st.align : 'left', tx = al === 'center' ? t.x + t.w / 2 : al === 'right' ? t.x + t.w - t.pad : t.x + t.pad;
+  h += `<text class="at${st.bold ? ' b' : ''}" x="${tx}" y="${t.y + t.pad + t.fs * 0.92}" font-size="${t.fs}" fill="${st.tcolor || c}"${t.empty ? ' fill-opacity=".45"' : ''} font-weight="${st.bold ? 700 : 400}" text-anchor="${al === 'center' ? 'middle' : al === 'right' ? 'end' : 'start'}" style="${esc(textCSS(st))}">${lines.map((l, i) => `<tspan x="${tx}"${i ? ` dy="${t.lh}"` : ''}>${esc(l) || ' '}</tspan>`).join('')}</text>`;
   return h;
 }
 function annSVG(m, z, sel, defs, pre = 'h-') {
@@ -1632,7 +1633,7 @@ async function backupProject(id) {
   toast('Preparing backup…');
   const pdfs = []; for (const d of p.docs) { const rec = await DB.get('pdfs', d.id); if (rec) pdfs.push({ id: d.id, name: d.name, dataURL: await bufToDataURL(rec.data) }); }
   const ids = new Set(p.markups.map(m => m.productId).filter(Boolean));
-  const out = { app: 'daniel-takeoff', kind: 'project-backup', format: 1, appVersion: VER, exported: new Date().toISOString(), project: p, products: S.products.filter(x => ids.has(x.id)), assemblies: S.asms.filter(a => p.markups.some(m => m.asm === a.id)), pdfs };
+  const out = { app: 'daniel-takeoff', kind: 'project-backup', format: 1, appVersion: VER, exported: new Date().toISOString(), project: p, products: S.products.filter(x => ids.has(x.id)), assemblies: S.asms.filter(a => p.markups.some(m => m.asm === a.id)), pdfs, fonts: await Promise.all(UFONTS.filter(f => p.markups.some(m => m.style?.font === f.id) || Object.values(UI.ann || {}).some(a => a?.font === f.id)).map(async ({ _face, data, ...f }) => ({ ...f, dataURL: await bufToDataURL(data) }))) };
   download(`${safeName(p.name)}_${new Date().toISOString().slice(0, 10)}.dtakeoff`, new Blob([JSON.stringify(out)], { type: 'application/json' }));
   toast('Backup saved to your downloads');
 }
@@ -1649,6 +1650,7 @@ async function restoreBackup(file) {
   const sc = {}; for (const [k, v] of Object.entries(p.scales || {})) { const [d, pg] = k.split(':'); sc[(docMap[d] || d) + ':' + pg] = v; } p.scales = sc;
   if (p.lastDoc) p.lastDoc = docMap[p.lastDoc] || p.lastDoc;
   for (const a of o.assemblies || []) if (!asmById(a.id)) { S.asms.push(a); saveAsms(); }
+  for (const f of o.fonts || []) if (!ufontById(f.id)) { try { const { dataURL, ...rest } = f, nf = { ...rest, data: await (await fetch(dataURL)).arrayBuffer() }; await registerFont(nf); UFONTS.push(nf); await saveFonts(); } catch (e) { console.warn('font restore', e); } }
   let addedP = 0; for (const pr of o.products || []) if (!prodById(pr.id)) { await saveProduct(pr); S.products.push(pr); addedP++; }
   p.updated = Date.now(); await DB.put('projects', p);
   refreshActiveProduct(); await openProject(p.id); toast(`Project restored${addedP ? ` (+${addedP} products)` : ''}`);
@@ -1704,7 +1706,7 @@ window.addEventListener('drop', async e => { e.preventDefault(); const fs = [...
 async function start() {
   $('#ver').textContent = VER; document.title = 'Daniel Takeoff ' + VER;
   await DB.open(); navigator.storage?.persist?.().catch(() => { });
-  S.products = await DB.all('products'); S.templates = await DB.all('templates'); S.asms = await loadAsms();
+  S.products = await DB.all('products'); S.templates = await DB.all('templates'); S.asms = await loadAsms(); await loadFonts();
   if (!(await DB.get('meta', 'seeded'))) {
     const t = { id: uid(), name: 'Standard job review', items: ['Verify ceiling height', 'Confirm materials and fixtures', 'Confirm finish / color selection', 'Field-verify wall dimensions', 'Check outlet and switch locations', 'Confirm door swings and clearances', 'Check plan revision / date', 'Confirm delivery and install access'] };
     await DB.put('templates', t); S.templates.push(t); await DB.put('meta', { id: 'seeded', at: Date.now() });
@@ -1719,7 +1721,7 @@ const UI_KEY = 'dt-ui-v1';
 const UI = (() => { try { return JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch { return {}; } })();
 if (UI.sideMin === undefined && innerWidth < 800) UI.sideMin = true;
 if (UI.panelMin === undefined && innerWidth < 800) UI.panelMin = true;   // v1.6: on phones the bottom dock does the panel's job
-window.DT = { asmBreakdown: (...a) => asmBreakdown(...a), asmVars: (...a) => asmVars(...a), computeEstimate: (...a) => computeEstimate(...a), placeOpening: (...a) => placeOpening(...a), asms: () => S.asms, snapPoint: (...a) => snapPoint(...a), toggleDraftOpt: (...a) => toggleDraftOpt(...a), applyTheme: (...a) => applyTheme(...a), setDockTab: (...a) => setDockTab(...a), S, UI, applyT, setSelection, selMarks, copySel, pasteClip, duplicateSel, deleteSelected, combineCounts, selectAllPage, fxEval, pickerMode, fitPage, toScreen, detInfo: () => detState, hitTest, toPage, computeEstimate, geo, fmtFtIn, qtyFor, flush, setTool, SCALES, undo, redo, styleOf, bboxOf, setDockTab, printDrawing, renderOverlay, refreshPanel };
+window.DT = { fonts: () => UFONTS.map(f => ({ id: f.id, name: f.name, fam: f.fam })), fontCss: (...a) => fontCss(...a), addFontFile: (...a) => addFontFile(...a), removeFont: (...a) => removeFont(...a), asmBreakdown: (...a) => asmBreakdown(...a), asmVars: (...a) => asmVars(...a), computeEstimate: (...a) => computeEstimate(...a), placeOpening: (...a) => placeOpening(...a), asms: () => S.asms, snapPoint: (...a) => snapPoint(...a), toggleDraftOpt: (...a) => toggleDraftOpt(...a), applyTheme: (...a) => applyTheme(...a), setDockTab: (...a) => setDockTab(...a), S, UI, applyT, setSelection, selMarks, copySel, pasteClip, duplicateSel, deleteSelected, combineCounts, selectAllPage, fxEval, pickerMode, fitPage, toScreen, detInfo: () => detState, hitTest, toPage, computeEstimate, geo, fmtFtIn, qtyFor, flush, setTool, SCALES, undo, redo, styleOf, bboxOf, setDockTab, printDrawing, renderOverlay, refreshPanel };
 
 if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => { reg.update().catch(() => { }); document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => { }); }); }).catch(() => { });
@@ -1887,7 +1889,7 @@ function editTextInPlace(m, isNew) {
   closeTextEditor();
   const st = styleOf(m), t = textLayout(m, st), ta = document.createElement('textarea');
   ta.id = 'inlineText'; ta.value = m.text || ''; ta.placeholder = 'Type your text…'; ta.spellcheck = true;
-  Object.assign(ta.style, { left: (S.tx + t.x * S.z) + 'px', top: (S.ty + t.y * S.z) + 'px', fontSize: clamp(st.fs * S.z, 13, 64) + 'px', color: st.color, fontWeight: st.bold ? '700' : '400' });
+  Object.assign(ta.style, { left: (S.tx + t.x * S.z) + 'px', top: (S.ty + t.y * S.z) + 'px', fontSize: clamp(st.fs * S.z, 13, 64) + 'px', color: st.tcolor || st.color, fontWeight: st.bold ? '700' : '400', fontFamily: fontCss(st.font), fontStyle: st.italic ? 'italic' : 'normal', textDecoration: st.underline ? 'underline' : 'none', textAlign: st.align || 'left' });
   viewer.appendChild(ta); S.editing = { m, isNew, ta };
   const fit = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 2 + 'px'; };
   ta.oninput = fit; fit(); setTimeout(() => ta.focus(), 0);
@@ -2415,6 +2417,67 @@ function bindAsmDraw(body) {
 }
 const asmToolStyle = A => A ? { ...(A.style || {}) } : null;
 
+
+/* ======================= v1.8.1: fonts — bundled OFL fonts (offline) + fonts you upload (kept in IndexedDB) ======================= */
+const FONT_SYS = "system-ui, 'Segoe UI', Arial, sans-serif";
+const FONTS_BUILTIN = [
+  { id: 'sys', name: 'System default', css: FONT_SYS },
+  { id: 'arch', name: 'Architects Daughter (hand-lettered)', fam: 'DT Architects Daughter', css: "'DT Architects Daughter', 'Comic Sans MS', cursive" },
+  { id: 'inter', name: 'Inter', fam: 'DT Inter', css: "'DT Inter', " + FONT_SYS },
+  { id: 'rcond', name: 'Roboto Condensed', fam: 'DT Roboto Condensed', css: "'DT Roboto Condensed', 'Arial Narrow', sans-serif" },
+  { id: 'serif', name: 'Source Serif 4', fam: 'DT Source Serif 4', css: "'DT Source Serif 4', Georgia, 'Times New Roman', serif" },
+  { id: 'mono', name: 'Roboto Mono', fam: 'DT Roboto Mono', css: "'DT Roboto Mono', ui-monospace, Consolas, monospace" },
+  { id: 'caveat', name: 'Caveat (handwriting)', fam: 'DT Caveat', css: "'DT Caveat', cursive" },
+];
+const UFONTS = [];   // uploaded: { id, name, fam, file, type, size, data: ArrayBuffer, added }
+const ufontById = id => UFONTS.find(f => f.id === id) || null;
+function fontCss(id) { const b = FONTS_BUILTIN.find(f => f.id === id); if (b) return b.css; const u = ufontById(id); return u ? `'${u.fam}', ${FONT_SYS}` : FONT_SYS; }
+function fontOptionsHTML(cur) {
+  const c = FONTS_BUILTIN.some(f => f.id === cur) || ufontById(cur) ? cur : 'sys';
+  const o = f => `<option value="${f.id}" ${f.id === c ? 'selected' : ''} style="font-family:${esc(fontCss(f.id))}">${esc(f.name)}</option>`;
+  return `<optgroup label="Built in">${FONTS_BUILTIN.map(o).join('')}</optgroup>${UFONTS.length ? `<optgroup label="Uploaded">${UFONTS.map(o).join('')}</optgroup>` : ''}`;
+}
+async function registerFont(f) { const face = new FontFace(f.fam, f.data); await face.load(); document.fonts.add(face); f._face = face; }
+async function loadFonts() {
+  try { const r = await DB.get('meta', 'fonts'); for (const f of r?.list || []) { try { await registerFont(f); UFONTS.push(f); } catch (e) { console.warn('font', f.name, e); } } } catch (e) { console.warn(e); }
+  try { await Promise.all(FONTS_BUILTIN.filter(f => f.fam).flatMap(f => ['400', '700', 'italic 400', 'italic 700'].map(w => document.fonts.load(`${w} 24px '${f.fam}'`)))); } catch (e) { console.warn(e); }
+}
+const saveFonts = () => DB.put('meta', { id: 'fonts', list: UFONTS.map(({ _face, ...f }) => f) });
+async function addFontFile(file) {
+  if (!/\.(ttf|otf|woff2?)$/i.test(file.name)) throw new Error('use a .ttf, .otf, .woff or .woff2 file');
+  if (file.size > 15e6) throw new Error('font file is over 15 MB');
+  const data = await file.arrayBuffer(), id = 'uf-' + uid().slice(0, 12);
+  const name = file.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim() || 'Uploaded font';
+  const f = { id, name, fam: 'DTU ' + id, file: file.name, type: file.type, size: file.size, data, added: Date.now() };
+  await registerFont(f); UFONTS.push(f); await saveFonts(); return f;
+}
+function pickFontFile(done) {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.ttf,.otf,.woff,.woff2';
+  inp.onchange = async () => { const file = inp.files[0]; if (!file) return; try { const f = await addFontFile(file); toast(`Font added: ${f.name}`); done(f); } catch (e) { toast('Could not load that font: ' + e.message, 3500); } };
+  inp.click();
+}
+async function removeFont(id) {
+  const i = UFONTS.findIndex(f => f.id === id); if (i < 0) return; const f = UFONTS[i];
+  try { document.fonts.delete(f._face); } catch { }
+  UFONTS.splice(i, 1); await saveFonts(); toast(`Removed font ${f.name}; its text now uses the system font`);
+}
+function fontStyleHTML(st, F) {
+  let h = '';
+  if (F.includes('font')) h += `<div class="sg wide fontrow"><span>Font</span><div class="fxRow"><select data-k="font" style="font-family:${esc(fontCss(st.font))}">${fontOptionsHTML(st.font)}</select><button type="button" class="small fontUp" title="Add a .ttf, .otf, .woff or .woff2 font; it stays on this device">Upload font…</button></div>${UFONTS.length ? `<div class="ufonts">${UFONTS.map(f => `<span class="uf" style="font-family:${esc(fontCss(f.id))}">${esc(f.name)}<button type="button" class="small fontDel" data-id="${f.id}" title="Remove this uploaded font" aria-label="Remove ${esc(f.name)}">×</button></span>`).join('')}</div>` : ''}</div>`;
+  if (F.includes('italic')) h += `<label class="sg chk"><input type="checkbox" data-k="italic" ${st.italic ? 'checked' : ''}> <i>Italic</i></label>`;
+  if (F.includes('underline')) h += `<label class="sg chk"><input type="checkbox" data-k="underline" ${st.underline ? 'checked' : ''}> <u>Underline</u></label>`;
+  if (F.includes('align')) { const a = st.align || 'left'; h += `<div class="sg"><span>Align</span><div class="fxRow">${[['left', '⯇ Left'], ['center', 'Center'], ['right', 'Right ⯈']].map(([v, n]) => `<button type="button" class="small alignb${a === v ? ' on' : ''}" data-k="align" data-v="${v}">${n}</button>`).join('')}</div></div>`; }
+  return h;
+}
+function bindFontControls(root, set) {
+  root.querySelectorAll('.fontUp').forEach(b => b.onclick = () => pickFontFile(f => set('font', f.id, true)));
+  root.querySelectorAll('.fontDel').forEach(b => b.onclick = async () => {
+    if (b.dataset.arm !== '1') { b.dataset.arm = '1'; b.textContent = 'Remove?'; setTimeout(() => { if (b.isConnected) { b.dataset.arm = ''; b.textContent = '×'; } }, 3000); return; }
+    const id = b.dataset.id; await removeFont(id); renderOverlay(); set('font', 'sys', true);
+  });
+}
+const textFont = st => `${st.italic ? 'italic ' : ''}${st.bold ? 700 : 400} 100px ${fontCss(st.font)}`;
+const textCSS = st => `font-family:${fontCss(st.font)};font-weight:${st.bold ? 700 : 400};font-style:${st.italic ? 'italic' : 'normal'}${st.underline ? ';text-decoration:underline' : ''}`;
 /* ======================= v1.6: style controls (Bluebeam/OST conventions: color, line width, line style, fill, hatch, opacity) ======================= */
 const hex6 = c => /^#[0-9a-f]{6}$/i.test(c || '') ? c : '#000000';
 const STYLE_FIELDS = {
@@ -2424,8 +2487,8 @@ const STYLE_FIELDS = {
   highlight: ['color', 'width', 'opacity'],
   pen: ['color', 'width', 'dash', 'opacity'], line: ['color', 'width', 'dash', 'opacity'], arrow: ['color', 'width', 'head', 'dash', 'opacity'],
   rect: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'opacity'], ellipse: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'opacity'], cloud: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'opacity'],
-  text: ['color', 'fs', 'bold', 'pad', 'bg', 'border', 'opacity'],
-  callout: ['color', 'tcolor', 'width', 'head', 'fs', 'bold', 'pad', 'bg', 'opacity'],
+  text: ['font', 'color', 'fs', 'bold', 'italic', 'underline', 'align', 'pad', 'bg', 'border', 'opacity'],
+  callout: ['font', 'color', 'tcolor', 'width', 'head', 'fs', 'bold', 'italic', 'underline', 'align', 'pad', 'bg', 'opacity'],
   opening: ['color', 'width'],
   dline: ['color', 'width', 'dash', 'opacity'], drect: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'hatch', 'hscale', 'opacity'], dim: ['color', 'width', 'fs', 'opacity'],
   wall: ['color', 'width', 'hatch', 'hscale', 'opacity', 'show'],
@@ -2439,7 +2502,7 @@ function hatchIcon(k) {
 }
 function styleHTML(st, F, kind) {
   const rng = (k, label, min, max, step, v, unit = '') => `<label class="sg"><span>${label} <output>${fmtStyle(k, v)}${unit}</output></span><input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${v}"></label>`;
-  let h = '<div class="stl">';
+  let h = '<div class="stl">' + (F.includes('font') ? fontStyleHTML(st, ['font']) : '');
   if (F.includes('color')) h += `<div class="sg wide"><span>Color</span><div class="sws">${SWATCHES.map(c => `<button type="button" class="swb${String(st.color).toLowerCase() === c ? ' on' : ''}" data-k="color" data-v="${c}" style="background:${c}" title="${c}" aria-label="Color ${c}"></button>`).join('')}<input type="color" data-k="color" value="${hex6(st.color)}" title="Custom color"></div></div>`;
   if (F.includes('width')) h += rng('width', kind === 'callout' ? 'Leader width' : kind === 'wall' ? 'Line weight' : 'Line width', kind === 'wall' ? 0.25 : 0.5, kind === 'highlight' ? 48 : kind === 'wall' ? 12 : 16, kind === 'wall' ? 0.25 : 0.5, +st.width || (kind === 'wall' ? 1 : 2), ' pt');
   if (F.includes('head')) h += rng('head', 'Arrow head size', 0.3, 4, 0.1, +st.head || 1, '×');
@@ -2451,7 +2514,8 @@ function styleHTML(st, F, kind) {
   if (F.includes('hatch')) h += `<div class="sg wide"><span>Pattern (hatch) <output>${esc(HATCHES[st.hatch || 'none'] || 'None')}</output></span>${HATCH_GROUPS.map(([g, ks]) => `<div class="hts"><i class="htg">${g}</i>${ks.map(k => `<button type="button" class="htb${(st.hatch || 'none') === k ? ' on' : ''}" data-k="hatch" data-v="${k}" title="${HATCHES[k]}" aria-label="Hatch ${HATCHES[k]}">${hatchIcon(k)}</button>`).join('')}</div>`).join('')}</div>`;
   if (F.includes('fs')) h += `<div class="sg fsrow"><span>Font size <output>${fmtStyle('fs', +st.fs || 16)} pt</output></span><div class="fsin"><input type="range" data-k="fs" min="4" max="200" step="1" value="${Math.min(200, +st.fs || 16)}"><input type="number" data-k="fs" min="2" max="800" step="1" value="${+st.fs || 16}" style="width:64px" title="Font size, pt"></div></div>`;
   if (F.includes('pad')) h += rng('pad', 'Padding', 0, 2, 0.05, st.pad != null && st.pad !== '' ? +st.pad : 0.35, '× size');
-  if (F.includes('bold')) h += `<label class="sg chk"><input type="checkbox" data-k="bold" ${st.bold ? 'checked' : ''}> Bold</label>`;
+  if (F.includes('bold')) h += `<label class="sg chk"><input type="checkbox" data-k="bold" ${st.bold ? 'checked' : ''}> <b>Bold</b></label>`;
+  h += fontStyleHTML(st, F.filter(k => k === 'italic' || k === 'underline' || k === 'align'));
   if (F.includes('bg')) { const BG = [['none', 'None'], ['#ffffff', 'White'], ['#fff7b0', 'Yellow'], ['#e8f1ff', 'Light blue']], cust = st.bg && !BG.some(([v]) => v === st.bg); h += `<label class="sg"><span>Background</span><span class="bgrow"><select data-k="bg">${BG.map(([v, n]) => `<option value="${v}" ${(st.bg || 'none') === v ? 'selected' : ''}>${n}</option>`).join('')}${cust ? `<option value="${esc(st.bg)}" selected>Custom</option>` : ''}</select><input type="color" data-k="bg" value="${hex6(st.bg && st.bg !== 'none' ? st.bg : '#ffffff')}" title="Custom background color"></span></label>`; }
   if (F.includes('border')) h += `<label class="sg chk"><input type="checkbox" data-k="border" ${st.border ? 'checked' : ''}> Border</label>`;
   if (F.includes('opacity')) h += rng('opacity', 'Opacity', 0.1, 1, 0.05, st.opacity ?? 1);
@@ -2460,6 +2524,7 @@ function styleHTML(st, F, kind) {
 }
 const fmtStyle = (k, v) => /opacity/i.test(k) ? Math.round(v * 100) + '%' : String(+(+v).toFixed(1));
 function bindStyle(root, set) {   // set(key, value, final)
+  bindFontControls(root, set);
   root.querySelectorAll('[data-k]').forEach(el => {
     const k = el.dataset.k;
     const val = () => el.type === 'checkbox' ? el.checked : el.dataset.v ?? (el.type === 'range' || el.type === 'number' ? parseFloat(el.value) : el.value);
@@ -2791,7 +2856,7 @@ async function printDrawing(all = false) {
   $('#printArea').innerHTML = secs.join('');
   await Promise.all([...$('#printArea').querySelectorAll('img')].map(i => i.decode().catch(() => { })));
   toast('Opening print…', 1200);
-  setPrintTitle(' - Drawing'); window.print();
+  setPrintTitle(' - Drawing'); try { await document.fonts.ready; } catch { } window.print();
 }
 $('#btnPrintDrawing').onclick = () => printDrawing(false);
 $('#btnPrintDrawings').onclick = () => printDrawing(true);

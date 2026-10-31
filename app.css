@@ -338,3 +338,18 @@ html[data-theme=light] .warnnote,html[data-theme=light] .warn{color:#8a6500}
 .bgrow input[type=color]{width:34px;padding:2px}
 .dpPick select{max-width:260px}
 @media print{html[data-theme]{--bg:#fff;--text:#000}}
+
+/* v1.8.1: bundled fonts (SIL OFL 1.1, see fonts/README.txt) */
+@font-face{font-family:'DT Architects Daughter';src:url(fonts/ArchitectsDaughter-Regular.woff2) format('woff2');font-style:normal;font-weight:400;font-display:swap}
+@font-face{font-family:'DT Caveat';src:url(fonts/Caveat-VF.woff2) format('woff2');font-style:normal;font-weight:400 700;font-display:swap}
+@font-face{font-family:'DT Inter';src:url(fonts/Inter-VF.woff2) format('woff2');font-style:normal;font-weight:100 900;font-display:swap}
+@font-face{font-family:'DT Inter';src:url(fonts/Inter-Italic-VF.woff2) format('woff2');font-style:italic;font-weight:100 900;font-display:swap}
+@font-face{font-family:'DT Roboto Condensed';src:url(fonts/RobotoCondensed-VF.woff2) format('woff2');font-style:normal;font-weight:100 900;font-display:swap}
+@font-face{font-family:'DT Roboto Condensed';src:url(fonts/RobotoCondensed-Italic-VF.woff2) format('woff2');font-style:italic;font-weight:100 900;font-display:swap}
+@font-face{font-family:'DT Source Serif 4';src:url(fonts/SourceSerif4-VF.woff2) format('woff2');font-style:normal;font-weight:100 900;font-display:swap}
+@font-face{font-family:'DT Source Serif 4';src:url(fonts/SourceSerif4-Italic-VF.woff2) format('woff2');font-style:italic;font-weight:100 900;font-display:swap}
+@font-face{font-family:'DT Roboto Mono';src:url(fonts/RobotoMono-VF.woff2) format('woff2');font-style:normal;font-weight:100 900;font-display:swap}
+@font-face{font-family:'DT Roboto Mono';src:url(fonts/RobotoMono-Italic-VF.woff2) format('woff2');font-style:italic;font-weight:100 900;font-display:swap}
+.fontrow .fxRow{flex-wrap:wrap;gap:6px;align-items:center}.fontrow select{min-width:200px;font-size:15px}
+.alignb{min-width:34px}.alignb.on{background:var(--accent,#1f8a7e);color:#fff}
+.ufonts{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}.ufonts .uf button{font-family:system-ui,'Segoe UI',Arial,sans-serif;font-style:normal;padding:0 7px;min-width:26px}.ufonts .uf{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:6px;padding:1px 2px 1px 8px;font-size:13px}
