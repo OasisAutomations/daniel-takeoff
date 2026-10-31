@@ -3,7 +3,7 @@ import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.7.1';
+const VER = 'v1.8.0';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -148,13 +148,13 @@ function archCell(kind, c, s) {   // returns [w, h, svg body] for a pattern cell
   }
   return [s, s, ''];
 }
-function archDef(id, kind, color, k, cell) {
-  const P = ARCH_PATS[kind], s = cell || clamp(k ? P.ft / k : P.pt, P.g === 'tex' ? P.pt * 0.75 : 1.5, 400), [w, h, body] = archCell(kind, color, s);
+function archDef(id, kind, color, k, cell, sc = 1) {
+  const P = ARCH_PATS[kind], s = (cell || clamp(k ? P.ft / k : P.pt, P.g === 'tex' ? P.pt * 0.75 : 1.5, 400)) * (+sc > 0 ? +sc : 1), [w, h, body] = archCell(kind, color, s);
   return `<pattern id="${id}" patternUnits="userSpaceOnUse" width="${+w.toFixed(3)}" height="${+h.toFixed(3)}">${body}</pattern>`;
 }
-function patId(defs, pre, kind, color, z, k) {   // registers the pattern in defs (once) and returns its id
-  const id = pre + kind + '-' + String(color).replace(/[^\w]/g, '') + (ARCH_PATS[kind] && k ? '-' + Math.round(1 / k) : '');
-  if (!defs.has(id)) defs.set(id, ARCH_PATS[kind] ? archDef(id, kind, color, k) : hatchDef(id, kind, color, z));
+function patId(defs, pre, kind, color, z, k, sc = 1) {   // registers the pattern in defs (once) and returns its id
+  const id = pre + kind + '-' + String(color).replace(/[^\w]/g, '') + (ARCH_PATS[kind] && k ? '-' + Math.round(1 / k) : '') + (+sc > 0 && +sc !== 1 ? '-s' + String(+sc).replace('.', '_') : '');
+  if (!defs.has(id)) defs.set(id, ARCH_PATS[kind] ? archDef(id, kind, color, k, undefined, sc) : hatchDef(id, kind, color, z, sc));
   return id;
 }
 let patIconN = 0;
@@ -189,11 +189,11 @@ function offsetLine(pts, d, closed) {   // mitered offset of a polyline (sheet u
 function wallSVG(m, st, z, sel, defs, pre, lab) {
   const k = kOf(m), w = m.wall, P = m.pts; if (P.length < 2) return '';
   const closed = P.length > 3 && dist(P[0], P[P.length - 1]) < 1e-6, T = wallThkPt(m), g = k ? (+w.gwb || 0) / 12 / k : 0, c = st.color;
-  const lw = clamp(+st.width || 1, 0.25, 8), edges = [-T / 2, -T / 2 + g, T / 2 - g, T / 2].filter((v, i, a) => i === 0 || v > a[i - 1] + 1e-9);
+  const lw = clamp(+st.width || 1, 0.25, 12), edges = [-T / 2, -T / 2 + g, T / 2 - g, T / 2].filter((v, i, a) => i === 0 || v > a[i - 1] + 1e-9);
   const band = (a, b) => { const A = offsetLine(P, a, closed), B = offsetLine(P, b, closed).reverse(); return pp(A.concat(B)); };
   let h = `<polygon points="${band(-T / 2, T / 2)}" fill="#fff" stroke="none"/>`;
-  const core = st.hatch && st.hatch !== 'none' && HATCHES[st.hatch] ? patId(defs, pre, st.hatch, c, z, k) : null;
-  if (g > 0) { const gy = patId(defs, pre, 'gyp', c, z, k); h += `<polygon points="${band(-T / 2, -T / 2 + g)}" fill="url(#${gy})"/><polygon points="${band(T / 2 - g, T / 2)}" fill="url(#${gy})"/>`; }
+  const core = st.hatch && st.hatch !== 'none' && HATCHES[st.hatch] ? patId(defs, pre, st.hatch, c, z, k, st.hscale) : null;
+  if (g > 0) { const gy = patId(defs, pre, 'gyp', c, z, k, st.hscale); h += `<polygon points="${band(-T / 2, -T / 2 + g)}" fill="url(#${gy})"/><polygon points="${band(T / 2 - g, T / 2)}" fill="url(#${gy})"/>`; }
   if (core) h += `<polygon points="${band(-T / 2 + g, T / 2 - g)}" fill="url(#${core})"/>`;
   if (st.fill !== 'none' && st.fillOpacity > 0 && !core) h += `<polygon points="${band(-T / 2, T / 2)}" fill="${c}" fill-opacity="${st.fillOpacity}"/>`;
   if (sel) h += `<polygon points="${band(-T / 2, T / 2)}" fill="none" stroke="#ffd23f" stroke-width="${3 / z}" stroke-linejoin="miter"/>`;
@@ -216,43 +216,6 @@ function bindWallPreset(root, pre, set) {
 const wallTool = () => ({ preset: 'w2x4', core: 3.5, gwb: 0.5, ...(UI.wall || {}) });
 
 /* ======================= v1.7: drafting (grid, snaps, typed lengths, dimensions) ======================= */
-const gridPt = () => { const k = curScale()?.ftPerPt; return k ? (UI.gridFt || 1) / k : 18; };
-function gridSVG(z) {
-  if (!UI.grid || !S.W) return '';
-  let g = gridPt(); while (g * z < 6) g *= 5;
-  return `<defs><pattern id="gridp" patternUnits="userSpaceOnUse" width="${g}" height="${g}"><path d="M${g} 0H0V${g}" fill="none" stroke="#5b9bd5" stroke-opacity=".45" stroke-width="${0.6 / z}"/></pattern></defs><rect x="0" y="0" width="${S.W}" height="${S.H}" fill="url(#gridp)" pointer-events="none"/>`;
-}
-function snapTargets() {   // endpoints and midpoints of everything on this page (plan linework and takeoff markups)
-  const out = [], seg = (a, b) => out.push(a, b, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
-  for (const m of pageMarkups()) {
-    const p = m.pts || []; if (m.type === 'count') continue;
-    if (!isQty(m) && ['rect', 'drect', 'ellipse', 'cloud'].includes(m.kind)) { const b = box2(p), C = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]]; C.forEach((c, i) => seg(c, C[(i + 1) % 4])); continue; }
-    if (!isQty(m) && ['text', 'callout', 'highlight', 'pen'].includes(m.kind)) continue;
-    for (let i = 1; i < p.length; i++) seg(p[i - 1], p[i]);
-    if (m.type === 'area' && p.length > 2) seg(p[p.length - 1], p[0]);
-  }
-  for (const q of S.drawing?.pts || []) out.push(q);
-  return out;
-}
-// v1.7.1: snap reach is a finger/cursor radius on screen, but never more than 2'-0" of real length (or 2% of the sheet
-// unscaled), so zoomed-out phone views don't grab far-away points; and never less than 8 screen px so it still works.
-function snapTol() {
-  const px = (COARSE ? 16 : 11) / S.z, k = curScale()?.ftPerPt, cap = k ? 2 / k : 0.02 * Math.max(S.W || 0, S.H || 0, 400);
-  return Math.max(8 / S.z, Math.min(px, cap));
-}
-function snapPoint(q, shift) {
-  S.snapHit = null;
-  if (UI.osnap !== false) {
-    const tol = snapTol(); let best = null, bd = tol;
-    for (const t of snapTargets()) { const d = dist(t, q); if (d < bd) { bd = d; best = t; } }
-    if (best) { S.snapHit = best; return best.slice(); }
-  }
-  let p = constrain(q, shift);
-  if (UI.gsnap) { const g = gridPt(), d = S.drawing, last = d?.pts[d.pts.length - 1], o = (shift || UI.ortho) && last;
-    p = [o && p[0] === last[0] ? p[0] : Math.round(p[0] / g) * g, o && p[1] === last[1] ? p[1] : Math.round(p[1] / g) * g]; }
-  return p;
-}
-function snapMark() { const h = S.snapHit; if (!h) return ''; const s = 7 / S.z; return `<rect x="${h[0] - s}" y="${h[1] - s}" width="${2 * s}" height="${2 * s}" fill="none" stroke="#ff7a00" stroke-width="${2 / S.z}"/>`; }
 function prevPill(e, lab, c, z) { const fs = 15 / z, w = lab.length * 0.62 * fs + 14 / z; return `<rect x="${e[0] + 10 / z}" y="${e[1] + 16 / z - fs * 0.75}" width="${w}" height="${fs * 1.5}" rx="${6 / z}" fill="#0f151a" fill-opacity=".92" stroke="${c}" stroke-width="${1.8 / z}"/><text class="lbl" x="${e[0] + 17 / z}" y="${e[1] + 16.5 / z}" font-size="${fs}" dominant-baseline="middle">${esc(lab)}</text>`; }
 const angOf = (a, b) => { let d = Math.atan2(a[1] - b[1], b[0] - a[0]) * 180 / Math.PI; return d < 0 ? d + 360 : d; };   // 0 = right, 90 = up
 function dimGeo(m) {
@@ -279,7 +242,7 @@ function draftPreview(d) {
   else {
     if (hv && pts.length) pts.push(hv);
     if (pts.length >= 2) {
-      if (d.type === 'wall') { const m = { ...ghost, type: 'length', wall: wallTool(), pts, productId: S.activeProductId || null, style: wallToolStyle() }, dm = new Map(), body = wallSVG(m, styleOf(m), z, false, dm, 'pvw-', ''); h += `<defs>${[...dm.values()].join('')}</defs>` + body; }
+      if (d.type === 'wall') { const A = asmById(UI.wallAsm), m = { ...ghost, type: 'length', wall: A ? { ...A.wall } : wallTool(), pts, productId: A ? null : S.activeProductId || null, asm: A?.id, color: A ? asmColor(A) : null, style: wallToolStyle() }, dm = new Map(), body = wallSVG(m, styleOf(m), z, false, dm, 'pvw-', ''); h += `<defs>${[...dm.values()].join('')}</defs>` + body; }
       else h += annSVG({ ...ghost, type: 'note', kind: 'dline', pts, style: annToolStyle('dline') }, z, false);
     }
     for (const p of d.pts) h += `<circle cx="${p[0]}" cy="${p[1]}" r="${3.5 / z}" fill="#fff" stroke="#2f6fb3" stroke-width="${1.4 / z}"/>`;
@@ -288,7 +251,7 @@ function draftPreview(d) {
   }
   return h;
 }
-const wallToolStyle = () => { const p = prodById(S.activeProductId), h = (UI.ann?.wall || {}).hatch; return p?.style?.hatch ? {} : h ? { hatch: h } : {}; };
+const wallToolStyle = () => { if (asmById(UI.wallAsm)) return {}; const p = prodById(S.activeProductId), w = UI.ann?.wall || {}, o = {}; if (w.hatch && !p?.style?.hatch) o.hatch = w.hatch; if (+w.width > 0) o.width = +w.width; if (+w.hscale > 0) o.hscale = +w.hscale; return o; };
 function draftTap(p, now) {
   const d = S.drawing, t = d.type, last = d.pts[d.pts.length - 1];
   if (last && (t === 'dline' || t === 'wall')) {
@@ -308,7 +271,9 @@ function finishDraft() {
   S.drawing = null; S.hover = null; S.snapHit = null;
   if (t === 'wall') {
     pushUndo();
-    const m = { id: uid(), type: 'length', docId: S.docId, page: S.pageNum, pts: d.pts.map(p => [rr2(p[0]), rr2(p[1])]), productId: S.activeProductId || null, label: '', height: UI.wallArea ? (UI.wallH > 0 ? UI.wallH : 9) : null, color: S.activeProductId ? null : '#333333', wall: wallTool(), created: Date.now() };
+    const A = asmById(UI.wallAsm);
+    const m = { id: uid(), type: 'length', docId: S.docId, page: S.pageNum, pts: d.pts.map(p => [rr2(p[0]), rr2(p[1])]), productId: A ? null : S.activeProductId || null, label: '', height: A ? (UI.wallH > 0 ? UI.wallH : (+A.h || 9)) : UI.wallArea ? (UI.wallH > 0 ? UI.wallH : 9) : null, color: A ? asmColor(A) : S.activeProductId ? null : '#333333', wall: A ? { ...A.wall } : wallTool(), created: Date.now() };
+    if (A) m.asm = A.id;
     const st = wallToolStyle(); if (Object.keys(st).length) m.style = st;
     S.project.markups.push(m); S.selId = m.id; touch(); updateFinish(); renderOverlay(); refreshPanel(); markThumb(); return m;
   }
@@ -335,7 +300,6 @@ function typedRect(wStr, hStr) {
   const W = parseFtIn(wStr), H = parseFtIn(hStr); if (!(W > 0) || !(H > 0)) { toast('Type width and height like 12\' and 10\''); return false; }
   const p = d.pts[0]; d.pts = [p, [p[0] + W / k, p[1] - H / k]]; finishDraft(); return true;
 }
-function toggleDraftOpt(k) { UI[k] = k === 'osnap' ? UI.osnap === false : !UI[k]; saveUI(); renderOverlay(); renderDock(true); toast(`${{ grid: 'Grid', gsnap: 'Snap to grid', ortho: 'Ortho', osnap: 'Snap to points' }[k]} ${(k === 'osnap' ? UI.osnap !== false : UI[k]) ? 'on' : 'off'}`, 1200); }
 
 /* ======================= v1.7: blank pages (a real one-page PDF built in the browser) ======================= */
 // v1.7.1: full grouped sheet list. Sizes are portrait (w < h) in PDF points; keys of v1.7.0 (letter, tabloid, archd) are kept.
@@ -450,20 +414,20 @@ function dockDraw(body) {
   const blank = `<div class="dsec"><b class="small">New blank page</b> ${blankFormHTML('bp')}</div>`;
   if (!S.project || !S.page) { body.innerHTML = `<div class="dhead"><b>Draw your own plan</b><span class="muted small">Start a blank sheet; the scale is set for you so takeoffs measure right away.</span></div>${blank}`; bindBlankForm(body, 'bp'); return; }
   const t = S.tool, d = S.drawing && isDraftTool(S.drawing.type) || (S.drawing && (S.drawing.type === 'length' || S.drawing.type === 'area')) ? S.drawing : null, k = curScale();
-  const tools = [['dline', 'Line / polyline'], ['drect', 'Rectangle'], ['wall', 'Wall'], ['dim', 'Dimension']];
+  const tools = [['dline', 'Line / polyline'], ['drect', 'Rectangle'], ['wall', 'Wall'], ['opening', 'Door / window'], ['dim', 'Dimension'], ['ceiling', 'Ceiling'], ['soffit', 'Soffit']];
   let typed = '';
   if (t === 'drect') typed = `<form id="dwRect" class="fxRow"><span class="small">Width</span><input id="dwW" placeholder="12'" style="width:80px" autocomplete="off"><span class="small">× Height</span><input id="dwH" placeholder="10'" style="width:80px" autocomplete="off"><button class="small accent">Place</button><span class="muted small">${d?.pts.length ? 'from the corner you tapped (right and up)' : 'tap a corner on the plan first'}</span></form>`;
-  else if (['dline', 'wall', 'length', 'area'].includes(t)) typed = `<form id="dwSeg" class="fxRow"><span class="small">Length</span><input id="dwL" placeholder="10'6&quot;" style="width:86px" autocomplete="off"><span class="small">Angle°</span><input id="dwA" inputmode="decimal" placeholder="0" style="width:56px" autocomplete="off">
+  else if (['dline', 'wall', 'length', 'area', 'ceiling', 'soffit'].includes(t)) typed = `<form id="dwSeg" class="fxRow"><span class="small">Length</span><input id="dwL" placeholder="10'6&quot;" style="width:86px" autocomplete="off"><span class="small">Angle°</span><input id="dwA" inputmode="decimal" placeholder="0" style="width:56px" autocomplete="off">
     ${[['0', '→'], ['90', '↑'], ['180', '←'], ['270', '↓']].map(([a, s]) => `<button type="button" class="small" data-ang="${a}" title="${a}°">${s}</button>`).join('')}<button class="small accent">Add segment</button><button type="button" class="small" id="dwFin" ${d?.pts.length > 1 ? '' : 'disabled'}>✓ Finish</button>
     <span class="muted small">${d?.pts.length ? '0° = right, 90° = up. Blank angle keeps the last direction.' : 'Tap the start point on the plan first.'}</span></form>`;
-  const sty = isDraftTool(t) ? (t === 'wall' ? `${wallPresetHTML(wallTool(), 'dw')}${styleHTML({ ...QTY_DEF, hatch: 'stud', width: 1, color: prodById(S.activeProductId)?.color || '#333333', ...(prodById(S.activeProductId)?.style || {}), ...wallToolStyle() }, ['hatch'], 'wall')}<div class="fxRow"><label class="chk small" title="New walls take their area: centerline LF × height"><input type="checkbox" id="dwWA" ${UI.wallArea ? 'checked' : ''}> Wall area = LF × height</label><input id="dwWH" inputmode="decimal" value="${esc(String(UI.wallH || 9))}" style="width:52px" title="Wall height, feet"><span class="small">ft high</span></div>
+  const sty = asmDrawHTML(t) + (isDraftTool(t) ? (t === 'wall' ? `${wallPresetHTML(wallTool(), 'dw')}${styleHTML({ ...QTY_DEF, hatch: 'stud', width: 1, color: prodById(S.activeProductId)?.color || '#333333', ...(prodById(S.activeProductId)?.style || {}), ...wallToolStyle() }, ['width', 'hatch', 'hscale'], 'wall')}<div class="fxRow"><label class="chk small" title="New walls take their area: centerline LF × height"><input type="checkbox" id="dwWA" ${UI.wallArea ? 'checked' : ''}> Wall area = LF × height</label><input id="dwWH" inputmode="decimal" value="${esc(String(UI.wallH || 9))}" style="width:52px" title="Wall height, feet"><span class="small">ft high</span></div>
     <p class="muted small">Walls count centerline LF for the product picked in the toolbar. With wall area on (or a height set in Properties) they count SF instead, unless the product's unit is LF.</p>`
-    : styleHTML(annToolStyle(t), STYLE_FIELDS[t], t)) : '';
+    : styleHTML(annToolStyle(t), STYLE_FIELDS[t], t)) : '');
   body.innerHTML = `<div class="dgrid"><div class="dcol">
     <div class="dhead"><b>Draw</b><span class="muted small">Plan linework: lines, rectangles and dimensions print on the drawing but never count. ${k ? 'Scale ' + esc(k.label) + '.' : '<b>Set a scale</b> to type exact lengths.'}</span></div>
     <div class="fxRow">${tools.map(([v, n]) => `<button type="button" class="small${t === v ? ' accent' : ''}" data-dtool="${v}">${n}</button>`).join('')}</div>
     ${typed}
-    <div class="fxRow">${tg('grid', 'Grid', UI.grid, 'Show a grid (G)')}<input id="dwGrid" style="width:58px" value="${esc(fmtFtIn(UI.gridFt || 1).replace(/-0"$/, ''))}" title="Grid spacing (real feet when the page has a scale)">${tg('gsnap', 'Snap to grid', UI.gsnap, 'Points land on the grid')}${tg('osnap', 'Snap to ends / midpoints', UI.osnap !== false, 'Points jump to nearby endpoints and midpoints')}${tg('ortho', 'Ortho', UI.ortho, 'Lock to horizontal / vertical (O, or hold Shift)')}</div>
+    ${snapRowsHTML()}
     <div class="fxRow"><button type="button" class="small" id="dwKey" title="Drop a labelled key of every material hatch and surface texture on this sheet (plan linework, never counted)">Insert pattern key</button></div>
     ${curDoc()?.blank ? sheetFormHTML(curDoc()) : ''}
     ${blank}
@@ -474,6 +438,7 @@ function dockDraw(body) {
   if (wa) { wa.onchange = () => { UI.wallArea = wa.checked; saveUI(); }; wh.onchange = () => { const v = parseFtIn(wh.value); if (v > 0) { UI.wallH = +v.toFixed(4); saveUI(); } else toast('Wall height like 9 or 8\'6"'); }; }
   body.querySelectorAll('[data-dtool]').forEach(b => b.onclick = () => setTool(b.dataset.dtool));
   body.querySelectorAll('[data-dopt]').forEach(c => c.onchange = () => toggleDraftOpt(c.dataset.dopt));
+  bindAsmDraw(body);
   const gi = body.querySelector('#dwGrid'); gi.onchange = () => { const v = parseFtIn(gi.value); if (v > 0) { UI.gridFt = v; saveUI(); renderOverlay(); } else toast('Grid spacing like 1\' or 6"'); };
   const seg = body.querySelector('#dwSeg');
   if (seg) {
@@ -485,7 +450,7 @@ function dockDraw(body) {
   const rf = body.querySelector('#dwRect'); if (rf) rf.onsubmit = e => { e.preventDefault(); typedRect(rf.querySelector('#dwW').value, rf.querySelector('#dwH').value); };
   if (t === 'wall') {
     bindWallPreset(body, 'dw', (w, hatch) => { UI.wall = w; if (hatch) { UI.ann = UI.ann || {}; UI.ann.wall = { ...(UI.ann.wall || {}), hatch }; } saveUI(); renderPreview(); renderDock(true); });
-    bindStyle(body.querySelector('.dcol.grow .stl'), (key, v, final) => { UI.ann = UI.ann || {}; UI.ann.wall = { ...(UI.ann.wall || {}), [key]: v }; saveUI(); if (final) renderDock(true); });
+    { const se = body.querySelectorAll('.dcol.grow .stl'); if (se.length) bindStyle(se[se.length - 1], (key, v, final) => { UI.ann = UI.ann || {}; UI.ann.wall = { ...(UI.ann.wall || {}), [key]: v }; saveUI(); renderPreview(); if (final) renderDock(true); }); }
   } else if (isDraftTool(t)) bindStyle(body.querySelector('.dcol.grow'), (key, v, final) => { UI.ann = UI.ann || {}; UI.ann[t] = { ...(UI.ann[t] || {}), [key]: v }; saveUI(); if (final) renderDock(true); });
 }
 
@@ -735,7 +700,7 @@ function geo(m) {
   if (!isQty(m)) return { note: true };
   if (m.type === 'count') return { ea: m.pts.length };
   const k = S.project.scales[m.docId + ':' + m.page]?.ftPerPt; if (!k) return { noscale: true };
-  if (m.type === 'length') { const lf = polyLen(m.pts) * k; return { lf, sf: m.height > 0 ? lf * m.height : null }; }
+  if (m.type === 'length') { const lf = polyLen(m.pts) * k; return { lf, sf: m.height > 0 ? Math.max(0, lf * m.height - (m.wall ? openArea(m) : 0)) : null }; }
   return { sf: shoelace(m.pts) * k * k, lf: polyLen(m.pts, true) * k };
 }
 // Quantity formula variables for one markup (see formula.js). Every value is a plain number.
@@ -769,12 +734,12 @@ function valueText(m) {
 }
 function styleOf(m) {   // effective look: defaults, then the product's style (like an OST condition), then this markup's own overrides
   if (!isQty(m)) return { ...(ANN_DEF[m.kind] || SHAPE), ...(m.style || {}) };
-  const p = prodById(m.productId), s = { ...QTY_DEF, ...(m.wall ? { hatch: 'stud', width: 1 } : {}), ...(p?.style || {}), ...(m.style || {}) };
-  s.color = m.style?.color || p?.color || m.color || TYPE_COLOR[m.type];
+  const p = prodById(m.productId), A = asmOf(m), s = { ...QTY_DEF, ...(m.wall ? { hatch: 'stud', width: 1 } : {}), ...(p?.style || {}), ...(A?.style || {}), ...(m.style || {}) };
+  s.color = m.style?.color || p?.color || A?.style?.color || m.color || TYPE_COLOR[m.type];
   return s;
 }
 const colorOf = m => styleOf(m).color;
-const markName = m => { if (!isQty(m)) return NOTE_NAMES[m.kind] || 'Markup'; const p = prodById(m.productId); return (p ? p.name : (m.wall ? 'Wall' : { length: 'Length', area: 'Area', count: 'Count' }[m.type])) + (m.label ? ' – ' + m.label : ''); };
+const markName = m => { if (!isQty(m)) return NOTE_NAMES[m.kind] || 'Markup'; const p = prodById(m.productId); return (p ? p.name : asmOf(m) ? asmOf(m).name : (m.wall ? 'Wall' : { length: 'Length', area: 'Area', count: 'Count' }[m.type])) + (m.label ? ' – ' + m.label : ''); };
 
 /* ---------- overlay ---------- */
 const pp = pts => pts.map(p => p[0] + ',' + p[1]).join(' ');
@@ -784,8 +749,8 @@ function pill(x, y, s, col, anchor, z) {   // value labels: dark pills with big 
   const fs = 15 / z, w = s.length * 0.62 * fs + 14 / z, hh = fs * 1.5, x0 = anchor === 'start' ? x : x - w / 2;
   return `<rect x="${x0}" y="${y - hh / 2}" width="${w}" height="${hh}" rx="${6 / z}" fill="#0f151a" fill-opacity=".92" stroke="${col}" stroke-width="${1.8 / z}"/><text class="lbl" x="${x0 + 7 / z}" y="${y + 0.5 / z}" font-size="${fs}" text-anchor="start" dominant-baseline="middle">${esc(s)}</text>`;
 }
-function hatchDef(id, kind, color, z) {   // SVG pattern; spacing stays the same on screen at any zoom (and in print)
-  const s = 9 / z, w = 1.1 / z;
+function hatchDef(id, kind, color, z, sc = 1) {   // SVG pattern; spacing stays the same on screen at any zoom (and in print)
+  const s = 9 / z * (+sc > 0 ? +sc : 1), w = 1.1 / z;
   const body = kind === 'dots' ? `<circle cx="${s / 2}" cy="${s / 2}" r="${1.2 / z}" fill="${color}"/>`
     : `<line x1="0" y1="${s / 2}" x2="${s}" y2="${s / 2}" stroke="${color}" stroke-width="${w}"/>` + (kind === 'cross' || kind === 'grid' ? `<line x1="${s / 2}" y1="0" x2="${s / 2}" y2="${s}" stroke="${color}" stroke-width="${w}"/>` : '');
   const rot = { diag: -45, back: 45, cross: 45, vert: 90 }[kind] || 0;
@@ -802,7 +767,7 @@ function qtySVG(m, z, sel, defs, pre, labs) {
     if (lab && !labs) { const e = m.pts[m.pts.length - 1]; h += pill(e[0] + 8 / z, e[1] - 10 / z, lab, c, 'start', z); }
   } else if (m.type === 'area') {
     if (st.fill !== 'none') h += `<polygon points="${P}" fill="${c}" fill-opacity="${st.fillOpacity}" stroke="none"/>`;
-    if (st.hatch && st.hatch !== 'none' && HATCHES[st.hatch]) h += `<polygon points="${P}" fill="url(#${patId(defs, pre, st.hatch, c, z, kOf(m))})" stroke="none"/>`;
+    if (st.hatch && st.hatch !== 'none' && HATCHES[st.hatch]) h += `<polygon points="${P}" fill="url(#${patId(defs, pre, st.hatch, c, z, kOf(m), st.hscale)})" stroke="none"/>`;
     if (sel) h += `<polygon points="${P}" fill="none" stroke="#fff" stroke-width="${sw + 3}" ${NS} stroke-linejoin="round"/>`;
     h += `<polygon points="${P}" fill="none" stroke="${c}" stroke-width="${sw}" ${NS} stroke-linejoin="round"${da}/>`;
     if (lab && !labs) { const [cx, cy] = centroid(m.pts); h += pill(cx, cy, lab, c, 'middle', z); }
@@ -819,13 +784,14 @@ const box2 = pts => { const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]); re
 const inBox = (q, b) => q[0] >= b.x0 && q[0] <= b.x1 && q[1] >= b.y0 && q[1] <= b.y1;
 const mctx = document.createElement('canvas').getContext('2d');
 function textLayout(m, st) {
-  const fs = clamp(+st.fs || 16, 2, 800), pad = fs * 0.35, lh = fs * 1.25, raw = String(m.text || ''), lines = (raw || ' ').split('\n');
+  const fs = clamp(+st.fs || 16, 2, 800), pad = fs * (st.pad != null && st.pad !== '' && +st.pad >= 0 ? +st.pad : 0.35), lh = fs * 1.25, raw = String(m.text || ''), lines = (raw || ' ').split('\n');
   mctx.font = `${st.bold ? 700 : 400} 100px system-ui, "Segoe UI", Arial, sans-serif`;
   const tw = Math.max(...lines.map(l => mctx.measureText(l).width)) * fs / 100;
   const a = m.kind === 'callout' ? m.pts[1] : m.pts[0];
   return { x: a[0], y: a[1], w: Math.max(tw, fs * 2) + pad * 2, h: lines.length * lh + pad * 2, fs, pad, lh, lines, empty: !raw.trim() };
 }
 function bboxOf(m) {
+  if (m.kind === 'opening') return openingBox(m);
   if (m.type === 'note' && (m.kind === 'text' || m.kind === 'callout')) {
     const t = textLayout(m, styleOf(m)); const b = { x0: t.x, y0: t.y, x1: t.x + t.w, y1: t.y + t.h };
     if (m.kind === 'callout') { const p = m.pts[0]; b.x0 = Math.min(b.x0, p[0]); b.y0 = Math.min(b.y0, p[1]); b.x1 = Math.max(b.x1, p[0]); b.y1 = Math.max(b.y1, p[1]); }
@@ -842,15 +808,15 @@ function cloudPath(b) {   // revision cloud: outward bulging arcs around the box
   }
   return d + 'Z';
 }
-function arrowHead(a, b, w, z, c) {   // filled head at b, pointing from a to b; returns [svg, base point]
-  const L = Math.max(w * 4, 10 / z), d = dist(a, b) || 1, ux = (b[0] - a[0]) / d, uy = (b[1] - a[1]) / d, bx = b[0] - ux * L, by = b[1] - uy * L, hw = L * 0.42;
+function arrowHead(a, b, w, z, c, hm = 1) {   // filled head at b, pointing from a to b; returns [svg, base point]
+  const L = Math.max(w * 4, 10 / z) * (+hm > 0 ? +hm : 1), d = dist(a, b) || 1, ux = (b[0] - a[0]) / d, uy = (b[1] - a[1]) / d, bx = b[0] - ux * L, by = b[1] - uy * L, hw = L * 0.42;
   return [`<polygon points="${b[0]},${b[1]} ${bx - uy * hw},${by + ux * hw} ${bx + uy * hw},${by - ux * hw}" fill="${c}" stroke="none"/>`, [bx, by]];
 }
 function textSVG(m, st, framed) {
   const t = textLayout(m, st), c = st.color; let h = '';
   if ((st.bg && st.bg !== 'none') || framed || st.border) h += `<rect x="${t.x}" y="${t.y}" width="${t.w}" height="${t.h}" rx="${t.fs * 0.15}" fill="${st.bg && st.bg !== 'none' ? st.bg : 'none'}"${framed || st.border ? ` stroke="${c}" stroke-width="${Math.max(+st.width || 1.5, t.fs * 0.06)}"` : ''}/>`;
   const lines = t.empty ? ['Text'] : t.lines;
-  h += `<text class="at" x="${t.x + t.pad}" y="${t.y + t.pad + t.fs * 0.92}" font-size="${t.fs}" fill="${c}"${t.empty ? ' fill-opacity=".45"' : ''} font-weight="${st.bold ? 700 : 400}">${lines.map((l, i) => `<tspan x="${t.x + t.pad}"${i ? ` dy="${t.lh}"` : ''}>${esc(l) || ' '}</tspan>`).join('')}</text>`;
+  h += `<text class="at" x="${t.x + t.pad}" y="${t.y + t.pad + t.fs * 0.92}" font-size="${t.fs}" fill="${st.tcolor || c}"${t.empty ? ' fill-opacity=".45"' : ''} font-weight="${st.bold ? 700 : 400}">${lines.map((l, i) => `<tspan x="${t.x + t.pad}"${i ? ` dy="${t.lh}"` : ''}>${esc(l) || ' '}</tspan>`).join('')}</text>`;
   return h;
 }
 function annSVG(m, z, sel, defs, pre = 'h-') {
@@ -861,18 +827,19 @@ function annSVG(m, z, sel, defs, pre = 'h-') {
   let h = '';
   if (k === 'highlight' || k === 'pen') h = p.length === 1 ? `<circle cx="${p[0][0]}" cy="${p[0][1]}" r="${w / 2}" fill="${c}"/>` : `<polyline points="${pp(p)}" fill="none" ${stroke}/>`;
   else if (k === 'line') h = `<line x1="${p[0][0]}" y1="${p[0][1]}" x2="${p[1][0]}" y2="${p[1][1]}" ${stroke}/>`;
-  else if (k === 'arrow') { const [hd, bs] = arrowHead(p[0], p[1], w, z, c); h = `<line x1="${p[0][0]}" y1="${p[0][1]}" x2="${bs[0]}" y2="${bs[1]}" ${stroke}/>` + hd; }
+  else if (k === 'arrow') { const [hd, bs] = arrowHead(p[0], p[1], w, z, c, +st.head || 1); h = `<line x1="${p[0][0]}" y1="${p[0][1]}" x2="${bs[0]}" y2="${bs[1]}" ${stroke}/>` + hd; }
   else if (k === 'rect') { const b = box2(p); h = `<rect x="${b.x0}" y="${b.y0}" width="${b.x1 - b.x0}" height="${b.y1 - b.y0}" ${fill} ${stroke}/>`; }
   else if (k === 'ellipse') { const b = box2(p); h = `<ellipse cx="${(b.x0 + b.x1) / 2}" cy="${(b.y0 + b.y1) / 2}" rx="${(b.x1 - b.x0) / 2}" ry="${(b.y1 - b.y0) / 2}" ${fill} ${stroke}/>`; }
   else if (k === 'cloud') h = `<path d="${cloudPath(box2(p))}" ${fill} ${stroke}/>`;
+  else if (k === 'opening') h = openingSVG(m, st, z);
   else if (k === 'dline') h = p.length === 1 ? `<circle cx="${p[0][0]}" cy="${p[0][1]}" r="${w / 2}" fill="${c}"/>` : `<polyline points="${pp(p)}" fill="none" ${stroke.replace('stroke-linejoin="round"', 'stroke-linejoin="miter"')}/>`;
-  else if (k === 'drect') { const b = box2(p), own = !defs; defs ||= new Map(); const hid = st.hatch && st.hatch !== 'none' && HATCHES[st.hatch] ? patId(defs, pre + (own ? 'pv-' : ''), st.hatch, c, z, kOf(m)) : null;
+  else if (k === 'drect') { const b = box2(p), own = !defs; defs ||= new Map(); const hid = st.hatch && st.hatch !== 'none' && HATCHES[st.hatch] ? patId(defs, pre + (own ? 'pv-' : ''), st.hatch, c, z, kOf(m), st.hscale) : null;
     h = (own && hid ? `<defs>${[...defs.values()].join('')}</defs>` : '') + `<rect x="${b.x0}" y="${b.y0}" width="${b.x1 - b.x0}" height="${b.y1 - b.y0}" ${fill} stroke="none"/>` + (hid ? `<rect x="${b.x0}" y="${b.y0}" width="${b.x1 - b.x0}" height="${b.y1 - b.y0}" fill="url(#${hid})" stroke="none"/>` : '') + `<rect x="${b.x0}" y="${b.y0}" width="${b.x1 - b.x0}" height="${b.y1 - b.y0}" fill="none" ${stroke.replace('stroke-linejoin="round"', 'stroke-linejoin="miter"')}/>`; }
   else if (k === 'dim') h = dimSVG(m, st, z);
   else if (k === 'text') h = textSVG(m, st, false);
   else if (k === 'callout') {
     const t = textLayout(m, st), tip = p[0], e = [clamp(tip[0], t.x, t.x + t.w), clamp(tip[1], t.y, t.y + t.h)];
-    const [hd, bs] = arrowHead(e, tip, w, z, c);
+    const [hd, bs] = arrowHead(e, tip, w, z, c, +st.head || 1);
     if (dist(e, tip) > 1e-6) h += `<line x1="${e[0]}" y1="${e[1]}" x2="${bs[0]}" y2="${bs[1]}" ${stroke}/>` + hd;
     h += textSVG(m, st, true);
   }
@@ -884,12 +851,13 @@ function annSVG(m, z, sel, defs, pre = 'h-') {
 // don't sit on plan linework or across a gap in it (door openings), nor on each other.
 const PLAN_KINDS = new Set(['dline', 'drect', 'dim']);
 function markupsSVG(ms, z, isSel, pre = 'h-') {
-  const defs = new Map(), labs = []; let plan = '', take = '', note = '';
+  const defs = new Map(), labs = []; let plan = '', take = '', note = '', ops = '';
   for (const m of ms) {
     if (isQty(m)) { const r = qtySVG(m, z, isSel(m), defs, pre, labs); if (m.wall) plan += r; else take += r; }
+    else if (m.kind === 'opening') ops += annSVG(m, z, isSel(m), defs, pre);
     else if (PLAN_KINDS.has(m.kind)) plan += annSVG(m, z, isSel(m), defs, pre); else note += annSVG(m, z, isSel(m), defs, pre);
   }
-  return (defs.size ? `<defs>${[...defs.values()].join('')}</defs>` : '') + plan + take + note + placeLabels(labs, ms, z);
+  return (defs.size ? `<defs>${[...defs.values()].join('')}</defs>` : '') + plan + ops + take + note + placeLabels(labs, ms, z);
 }
 function planObstacles(ms) {   // segments a label should not cover: plan linework, wall faces, dimension lines/text, and gaps
   const segs = [], ends = [], add = (a, b) => segs.push([a, b]);
@@ -943,6 +911,7 @@ function placeLabels(labs, ms, z) {
 }
 function handlesOf(m) {   // vertex handles (i) for lines/areas/arrows/callouts; corner resize handles for boxes, freehand and text
   if (isQty(m)) return m.type === 'count' ? [] : m.pts.map((p, i) => ({ x: p[0], y: p[1], i }));
+  if (m.kind === 'opening') return [];
   if (['line', 'arrow', 'callout', 'dline', 'dim'].includes(m.kind)) return m.pts.map((p, i) => ({ x: p[0], y: p[1], i }));
   const b = bboxOf(m);
   if (m.kind === 'text') return [{ x: b.x1, y: b.y1, corner: 2 }];
@@ -962,7 +931,7 @@ function renderOverlay() {
 function renderPreview() {
   const g = world.querySelector('#pv'); if (!g) return;
   if (S.annPrev) { g.innerHTML = annSVG({ type: 'note', kind: S.annPrev.kind, pts: S.annPrev.pts, style: annToolStyle(S.annPrev.kind), text: '' }, S.z, false); return; }
-  const d = S.drawing; if (!d) { g.innerHTML = snapMark(); return; }
+  const d = S.drawing; if (!d) { g.innerHTML = (S.tool === 'opening' ? openingGhost() : '') + snapMark(); return; }
   if (isDraftTool(d.type)) { g.innerHTML = draftPreview(d) + snapMark(); return; }
   const z = S.z, pts = d.pts.slice(); if (S.hover && pts.length) pts.push(S.hover);
   const c = d.type === 'calibrate' ? '#d1495b' : (prodById(S.activeProductId)?.color || TYPE_COLOR[d.type]);
@@ -974,8 +943,9 @@ function renderPreview() {
     for (const p of d.pts) h += `<circle cx="${p[0]}" cy="${p[1]}" r="${4 / z}" fill="#fff" stroke="${c}" stroke-width="${1.6 / z}"/>`;
     const k = curScale()?.ftPerPt, e = pts[pts.length - 1];
     let lab = '';
-    if (d.type === 'length' && k) lab = fmtFtIn(polyLen(pts) * k);
-    if (d.type === 'area' && k && pts.length > 2) lab = fmtN(shoelace(pts) * k * k) + ' SF';
+    const sg = pts.length > 1 && k ? `${fmtFtIn(dist(pts[pts.length - 2], e) * k)} @ ${Math.round(angOf(pts[pts.length - 2], e) * 10) / 10}°` : '';
+    if (d.type === 'length' && k) lab = pts.length > 2 ? `${sg} · total ${fmtFtIn(polyLen(pts) * k)}` : fmtFtIn(polyLen(pts) * k) + (sg ? ' @ ' + sg.split(' @ ')[1] : '');
+    if (d.type === 'area' && k) lab = pts.length > 2 ? `${sg} · ${fmtN(shoelace(pts) * k * k)} SF` : sg;
     if (d.type === 'calibrate' && pts.length > 1 && k) lab = fmtFtIn(polyLen(pts) * k) + ' (current scale)';
     if (lab) h += prevPill(e, lab, c, z);
   }
@@ -1004,13 +974,13 @@ const HINTS = {
   wall: 'Wall: tap along the wall centerline (type exact lengths in the Draw panel). Double-tap, Enter or ✓ Finish to end; tap the first point to close the room.',
 };
 function setTool(t) {
-  if ((t === 'length' || t === 'area' || t === 'wall') && !curScale() && S.page) { S.scaleNext = t; setDockTab('scale'); toast('Set the scale for this page first'); return; }
+  if ((t === 'length' || t === 'area' || t === 'wall' || isAsmTool(t)) && !curScale() && S.page) { S.scaleNext = t; setDockTab('scale'); toast('Set the scale for this page first'); return; }
   closeTextEditor(); cancelDrawing(); if (t !== S.tool && isAnnTool(t) && S.sel.size) S.selId = null;   // v1.6: picking a tool starts fresh (Bluebeam-style); the tool's look shows in Properties
   S.tool = t; if (t !== 'calibrate') S.calib = null;
   const ap = prodById(S.activeProductId), u = String(ap?.unit || '').toUpperCase();
   if (ap && (QTY_TYPES.has(t) || t === 'wall') && ((t === 'count' && (u === 'LF' || u === 'SF')) || ((t === 'length' || t === 'area' || t === 'wall') && u === 'EA'))) { S.activeProductId = ''; refreshActiveProduct(); toast(`${ap.name} is priced per ${u} — pick a product for this tool`); }
   $$('.tool').forEach(b => b.classList.toggle('on', b.dataset.tool === t));
-  if (isDraftTool(t) && S.dockTab !== 'draw') { S.dockTab = 'draw'; UI.dockTab = 'draw'; if (UI.dockMin) { UI.dockMin = false; applyDock(); } saveUI(); }
+  if ((isDraftTool(t) || isAsmTool(t)) && S.dockTab !== 'draw') { S.dockTab = 'draw'; UI.dockTab = 'draw'; if (UI.dockMin) { UI.dockMin = false; applyDock(); } saveUI(); }
   viewer.classList.toggle('drawing', t !== 'select');
   const h = $('#hint'); h.textContent = HINTS[t] || ''; h.classList.toggle('on', !!HINTS[t]);
   updateFinish(); renderOverlay(); refreshActiveProduct(); renderDock();
@@ -1036,7 +1006,9 @@ function finishDrawing() {
   const need = d.type === 'area' ? 3 : 2;
   if (d.pts.length < need) { toast(d.type === 'area' ? 'An area needs at least 3 points' : 'A length needs at least 2 points'); return; }
   pushUndo();
-  const m = { id: uid(), type: d.type, docId: S.docId, page: S.pageNum, pts: d.pts, productId: S.activeProductId || null, label: '', height: null, color: S.activeProductId ? null : TYPE_COLOR[d.type], created: Date.now() };
+  const A = d.asmTool && asmById(UI[d.asmTool === 'ceiling' ? 'ceilAsm' : 'soffitAsm']);
+  const m = { id: uid(), type: d.type, docId: S.docId, page: S.pageNum, pts: d.pts, productId: A ? null : S.activeProductId || null, label: '', height: null, color: A ? asmColor(A) : S.activeProductId ? null : TYPE_COLOR[d.type], created: Date.now() };
+  if (A) m.asm = A.id;
   S.project.markups.push(m); S.selId = m.id; S.drawing = null; S.hover = null;
   touch(); updateFinish(); renderOverlay(); refreshPanel(); markThumb();
 }
@@ -1055,14 +1027,15 @@ function tap(sx, sy, e) {
     m.pts.push(q); S.selId = m.id; touch(); updateFinish(); renderOverlay(); refreshPanel(); markThumb(); return;
   }
   // length / area / calibrate / v1.7 drafting
-  if (!S.drawing) S.drawing = { type: t, pts: [] };
+  if (t === 'opening') { placeOpening(q); return; }
+  if (!S.drawing) S.drawing = { type: ASM_DRAW[t] || t, pts: [], asmTool: ASM_DRAW[t] ? t : null };
   const d = S.drawing, now = Date.now();
   const p = snapPoint(q, e.shiftKey);
   if (isDraftTool(t)) { draftTap(p, now); return; }
   if (d.pts.length) {
     const last = d.pts[d.pts.length - 1];
     if (now - (S.lastTap || 0) < 380 && dist(last, p) * S.z < 12 && t !== 'calibrate') { S.lastTap = 0; finishDrawing(); return; }
-    if (t === 'area' && d.pts.length >= 3 && dist(d.pts[0], p) * S.z < 12) { finishDrawing(); return; }
+    if (d.type === 'area' && d.pts.length >= 3 && dist(d.pts[0], p) * S.z < 12) { finishDrawing(); return; }
   }
   S.lastTap = now; d.pts.push(p); d.shift = e.shiftKey; updateFinish(); renderPreview();
   if (t === 'calibrate' && d.pts.length === 2) { const dp = dist(d.pts[0], d.pts[1]); S.drawing = null; renderPreview(); S.calib = { dPts: dp }; setDockTab('scale'); setTimeout(() => $('#cFt')?.focus(), 30); }
@@ -1087,6 +1060,7 @@ function noteDist(m, q, tol) {
   const st = styleOf(m), hw = (+st.width || 0) / 2, p = m.pts;
   const poly = (pts, closed) => { let d = Infinity; for (let i = 1; i < pts.length; i++) d = Math.min(d, segDist(q, pts[i - 1], pts[i])); if (closed) d = Math.min(d, segDist(q, pts[pts.length - 1], pts[0])); return pts.length === 1 ? dist(q, pts[0]) : d; };
   if (m.kind === 'highlight' || m.kind === 'pen' || m.kind === 'line' || m.kind === 'arrow' || m.kind === 'dline') return Math.max(0, poly(p) - hw);
+  if (m.kind === 'opening') return openingDist(m, q);
   if (m.kind === 'dim') { const o = dimGeo(m); return o ? Math.min(segDist(q, o.a2, o.b2), segDist(q, p[0], o.a2), segDist(q, p[1], o.b2)) : poly(p); }
   if (m.kind === 'text') return inBox(q, bboxOf(m)) ? 0 : Infinity;
   if (m.kind === 'callout') { const t = textLayout(m, st); return inBox(q, { x0: t.x, y0: t.y, x1: t.x + t.w, y1: t.y + t.h }) ? 0 : Math.max(0, segDist(q, p[0], [clamp(p[0][0], t.x, t.x + t.w), clamp(p[0][1], t.y, t.y + t.h)]) - hw); }
@@ -1131,7 +1105,7 @@ viewer.addEventListener('pointermove', e => {
     S.z = nz; S.tx = m[0] - px * nz; S.ty = m[1] - py * nz; applyT(); return;
   }
   if (G?.type === 'movecand' && dist(p, G.s) > G.thr) {
-    pushUndo(); G.type = 'move'; G.items = selMarks().map(m => ({ m, pts0: m.pts.map(q => q.slice()) }));
+    pushUndo(); G.type = 'move'; const sm = selMarks(), sid = new Set(sm.map(m => m.id)); G.items = [...sm, ...S.project.markups.filter(o => o.kind === 'opening' && sid.has(o.wallId) && !sid.has(o.id))].map(m => ({ m, pts0: m.pts.map(q => q.slice()) }));
   }
   if (G?.type === 'move') {
     const dx = (p[0] - G.s[0]) / S.z, dy = (p[1] - G.s[1]) / S.z;
@@ -1157,7 +1131,8 @@ viewer.addEventListener('pointermove', e => {
     S.annPrev = { kind: G.kind, pts: G.pts }; renderPreview(); return;
   }
   if (!G && S.drawing && e.pointerType !== 'touch') { S.drawing.shift = e.shiftKey; S.hover = snapPoint(toPage(...p), e.shiftKey); renderPreview(); }
-  else if (!G && !S.drawing && e.pointerType !== 'touch' && S.page && (isDraftTool(S.tool) || S.tool === 'length' || S.tool === 'area')) { S.hover = null; snapPoint(toPage(...p), false); renderPreview(); }
+  else if (!G && !S.drawing && e.pointerType !== 'touch' && S.page && (isDraftTool(S.tool) || S.tool === 'length' || S.tool === 'area' || S.tool === 'ceiling' || S.tool === 'soffit')) { S.hover = null; snapPoint(toPage(...p), false); renderPreview(); }
+  else if (!G && S.tool === 'opening' && S.page && e.pointerType !== 'touch') { S.opHover = toPage(...p); renderPreview(); }
 });
 function drawMarquee(a, b) {
   const el = $('#marquee'); el.classList.remove('hidden');
@@ -1213,7 +1188,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'backspace' || k === 'delete') { if (S.drawing?.pts.length) undo(); else if (S.sel.size) deleteSelected(); e.preventDefault(); }
   else if (k === 'v') setTool('select'); else if (k === 'l') setTool('length'); else if (k === 'a') setTool('area'); else if (k === 'c') setTool('count');
   else if (k === 'h') setTool('highlight'); else if (k === 'p') setTool('pen'); else if (k === 't') setTool('text'); else if (k === 'r') setTool('rect'); else if (k === 'e') setTool('ellipse'); else if (k === 'k') setTool('cloud'); else if (k === 'w') setTool('arrow');
-  else if (k === 'g') toggleDraftOpt('grid'); else if (k === 'o') toggleDraftOpt('ortho'); else if (k === 'd') setTool('dline'); else if (k === 'm') setTool('dim');
+  else if (k === 'g') toggleDraftOpt('grid'); else if (k === 's') toggleDraftOpt('snap'); else if (k === 'o') toggleDraftOpt('ortho'); else if (k === 'd') setTool('dline'); else if (k === 'm') setTool('dim');
   else if (k === 'f') fitPage(); else if (k === '+' || k === '=') zoomAt(1.25, viewer.clientWidth / 2, viewer.clientHeight / 2); else if (k === '-') zoomAt(0.8, viewer.clientWidth / 2, viewer.clientHeight / 2);
   else if (k === 'pagedown') gotoPage(1); else if (k === 'pageup') gotoPage(-1);
 });
@@ -1308,7 +1283,8 @@ function pageAgg(ms) {
   const agg = new Map();
   for (const m of ms) {
     if (!isQty(m)) continue;
-    const p = prodById(m.productId), key = p ? p.id : 'u-' + nativeUnit(m), q = p ? qtyFor(m, p) : (m.type === 'count' ? m.pts.length : (m.type === 'area' ? geo(m).sf : (geo(m).sf ?? geo(m).lf)));
+    const p = prodById(m.productId), A = !p && asmOf(m); if (A) { const g = geo(m), a = agg.get('a-' + A.id) || { name: A.name, unit: m.type === 'area' ? 'SF' : 'LF', color: asmColor(A), q: 0, hatch: null }; if (!a.hatch) { const h = styleOf(m).hatch; if (h && h !== 'none' && HATCHES[h]) { a.hatch = h; a.k = kOf(m); } } if (!g.noscale) a.q += m.type === 'area' ? g.sf : g.lf; agg.set('a-' + A.id, a); continue; }
+    const key = p ? p.id : 'u-' + nativeUnit(m), q = p ? qtyFor(m, p) : (m.type === 'count' ? m.pts.length : (m.type === 'area' ? geo(m).sf : (geo(m).sf ?? geo(m).lf)));
     const a = agg.get(key) || { name: p ? p.name : 'Unassigned', unit: p ? p.unit : nativeUnit(m), color: p ? p.color : '#888', q: 0, hatch: null };
     if (!a.hatch && (m.type === 'area' || m.wall)) { const h = styleOf(m).hatch; if (h && h !== 'none' && HATCHES[h]) { a.hatch = h; a.k = kOf(m); } }
     if (q != null) a.q += q; agg.set(key, a);
@@ -1347,7 +1323,7 @@ function duplicateSel() {
 }
 function deleteSelected() {
   const ids = new Set(selMarks().map(m => m.id)); if (!ids.size) return;
-  pushUndo(); S.project.markups = S.project.markups.filter(m => !ids.has(m.id)); if (ids.has(S.countId)) S.countId = null; S.selId = null;
+  pushUndo(); S.project.markups = S.project.markups.filter(m => !ids.has(m.id) && !ids.has(m.wallId)); if (ids.has(S.countId)) S.countId = null; S.selId = null;
   touch(); renderOverlay(); refreshPanel(); markThumb(); updateFinish(); toast(`Deleted ${ids.size} — Undo to restore`);
 }
 function combineCounts() {
@@ -1363,7 +1339,7 @@ function combineCounts() {
 }
 function selectAllPage() { if (!S.page) return; if (S.tool !== 'select') setTool('select'); setSelection(pageMarkups().map(m => m.id)); renderOverlay(); refreshPanel(); }
 function deleteMarkup(id) {
-  pushUndo(); S.project.markups = S.project.markups.filter(m => m.id !== id);
+  pushUndo(); S.project.markups = S.project.markups.filter(m => m.id !== id && m.wallId !== id);
   if (S.selId === id) S.selId = null; if (S.countId === id) S.countId = null;
   touch(); renderOverlay(); refreshPanel(); markThumb(); updateFinish(); toast('Markup deleted — Undo to restore');
 }
@@ -1375,6 +1351,7 @@ function computeEstimate() {
   for (const m of P.markups) {
     if (!isQty(m)) continue;   // v1.6: highlights, text, clouds… are drawing notes only
     const p = prodById(m.productId);
+    if (!p && asmOf(m)) continue;   // v1.8: priced by its assembly below
     if (!p) { const g = geo(m); if (g.noscale) { noScale++; continue; } un.n++; if (m.type === 'count') un.EA += g.ea; else if (m.type === 'area') un.SF += g.sf; else if (g.sf != null) un.SF += g.sf; else un.LF += g.lf; continue; }
     const q = qtyFor(m, p); if (q == null) { noScale++; continue; }
     const r = rows.get(p.id) || { prod: p, qty: 0, n: 0 }; r.qty += q; r.n++; rows.set(p.id, r);
@@ -1383,6 +1360,7 @@ function computeEstimate() {
     const w = num(r.prod.waste), qw = r.qty * (1 + w / 100), price = num(r.prod.price), lab = num(r.prod.labor);
     return { kind: 'product', id: r.prod.id, name: r.prod.name, category: r.prod.category || '', unit: r.prod.unit, qty: r.qty, waste: w, qtyW: qw, price, mat: qw * price, laborU: lab, labor: qw * lab, total: qw * (price + lab), n: r.n };
   });
+  const AE = asmEstimateLines(P); lines.push(...AE.lines); noScale += AE.noScale;   // v1.8: one group per wall type / assembly
   // estimate-line formulas: Q("name") measured qty, QW("name") with waste, N("name") markup count
   const findLine = name => {
     const k = String(name).trim().toLowerCase(), pool = [...lines, ...P.manual.filter(x => !(typeof x.qty === 'string' && x.qty.trim().startsWith('='))).map(x => ({ name: x.desc || '', qty: num(x.qty), qtyW: num(x.qty) * (1 + num(x.waste) / 100), n: 1 }))];
@@ -1415,7 +1393,7 @@ function renderEstimate() {
   let cat = null;
   for (const l of E.lines) {
     if (l.category !== cat) { cat = l.category; h += `<tr class="cat"><td colspan="${C}">${esc(cat || 'Uncategorized')}</td></tr>`; }
-    h += `<tr><td><span class="sw" style="display:inline-block;background:${prodById(l.id)?.color};margin-right:6px"></span>${esc(l.name)} <span class="muted small">(${l.n})</span></td><td>${esc(l.unit)}</td><td class="n">${fmtQty(l.qty, l.unit)}</td><td class="n">${fmtN(l.waste, l.waste % 1 ? 1 : 0)}%</td><td class="n"><b>${fmtQty(l.qtyW, l.unit)}</b></td>${P ? `<td class="n">${m$(l.price)}</td><td class="n">${m$(l.mat)}</td><td class="n">${m$(l.laborU)}</td><td class="n">${m$(l.labor)}</td><td class="n"><b>${m$(l.total)}</b></td>` : ''}<td></td></tr>`;
+    h += `<tr><td><span class="sw" style="display:inline-block;background:${l.color || prodById(l.id)?.color};margin-right:6px"></span>${esc(l.name)} <span class="muted small">(${l.n})</span></td><td>${esc(l.unit)}</td><td class="n">${fmtQty(l.qty, l.unit)}</td><td class="n">${fmtN(l.waste, l.waste % 1 ? 1 : 0)}%</td><td class="n"><b>${fmtQty(l.qtyW, l.unit)}</b></td>${P ? (M => `<td class="n">${M(l.price)}</td><td class="n">${M(l.mat)}</td><td class="n">${M(l.laborU)}</td><td class="n">${M(l.labor)}</td><td class="n"><b>${M(l.total)}</b></td>`)(l.kind === 'asm' ? fmt$ : m$) : ''}<td></td></tr>`;
   }
   if (E.manual.length) h += `<tr class="cat"><td colspan="${C}">Manual items</td></tr>`;
   for (const l of E.manual) {
@@ -1654,7 +1632,7 @@ async function backupProject(id) {
   toast('Preparing backup…');
   const pdfs = []; for (const d of p.docs) { const rec = await DB.get('pdfs', d.id); if (rec) pdfs.push({ id: d.id, name: d.name, dataURL: await bufToDataURL(rec.data) }); }
   const ids = new Set(p.markups.map(m => m.productId).filter(Boolean));
-  const out = { app: 'daniel-takeoff', kind: 'project-backup', format: 1, appVersion: VER, exported: new Date().toISOString(), project: p, products: S.products.filter(x => ids.has(x.id)), pdfs };
+  const out = { app: 'daniel-takeoff', kind: 'project-backup', format: 1, appVersion: VER, exported: new Date().toISOString(), project: p, products: S.products.filter(x => ids.has(x.id)), assemblies: S.asms.filter(a => p.markups.some(m => m.asm === a.id)), pdfs };
   download(`${safeName(p.name)}_${new Date().toISOString().slice(0, 10)}.dtakeoff`, new Blob([JSON.stringify(out)], { type: 'application/json' }));
   toast('Backup saved to your downloads');
 }
@@ -1670,6 +1648,7 @@ async function restoreBackup(file) {
   p.markups = p.markups.map(m => ({ ...m, docId: docMap[m.docId] || m.docId }));
   const sc = {}; for (const [k, v] of Object.entries(p.scales || {})) { const [d, pg] = k.split(':'); sc[(docMap[d] || d) + ':' + pg] = v; } p.scales = sc;
   if (p.lastDoc) p.lastDoc = docMap[p.lastDoc] || p.lastDoc;
+  for (const a of o.assemblies || []) if (!asmById(a.id)) { S.asms.push(a); saveAsms(); }
   let addedP = 0; for (const pr of o.products || []) if (!prodById(pr.id)) { await saveProduct(pr); S.products.push(pr); addedP++; }
   p.updated = Date.now(); await DB.put('projects', p);
   refreshActiveProduct(); await openProject(p.id); toast(`Project restored${addedP ? ` (+${addedP} products)` : ''}`);
@@ -1725,7 +1704,7 @@ window.addEventListener('drop', async e => { e.preventDefault(); const fs = [...
 async function start() {
   $('#ver').textContent = VER; document.title = 'Daniel Takeoff ' + VER;
   await DB.open(); navigator.storage?.persist?.().catch(() => { });
-  S.products = await DB.all('products'); S.templates = await DB.all('templates');
+  S.products = await DB.all('products'); S.templates = await DB.all('templates'); S.asms = await loadAsms();
   if (!(await DB.get('meta', 'seeded'))) {
     const t = { id: uid(), name: 'Standard job review', items: ['Verify ceiling height', 'Confirm materials and fixtures', 'Confirm finish / color selection', 'Field-verify wall dimensions', 'Check outlet and switch locations', 'Confirm door swings and clearances', 'Check plan revision / date', 'Confirm delivery and install access'] };
     await DB.put('templates', t); S.templates.push(t); await DB.put('meta', { id: 'seeded', at: Date.now() });
@@ -1740,7 +1719,7 @@ const UI_KEY = 'dt-ui-v1';
 const UI = (() => { try { return JSON.parse(localStorage.getItem(UI_KEY)) || {}; } catch { return {}; } })();
 if (UI.sideMin === undefined && innerWidth < 800) UI.sideMin = true;
 if (UI.panelMin === undefined && innerWidth < 800) UI.panelMin = true;   // v1.6: on phones the bottom dock does the panel's job
-window.DT = { S, UI, applyT, setSelection, selMarks, copySel, pasteClip, duplicateSel, deleteSelected, combineCounts, selectAllPage, fxEval, pickerMode, fitPage, toScreen, detInfo: () => detState, hitTest, toPage, computeEstimate, geo, fmtFtIn, qtyFor, flush, setTool, SCALES, undo, redo, styleOf, bboxOf, setDockTab, printDrawing, renderOverlay, refreshPanel };
+window.DT = { asmBreakdown: (...a) => asmBreakdown(...a), asmVars: (...a) => asmVars(...a), computeEstimate: (...a) => computeEstimate(...a), placeOpening: (...a) => placeOpening(...a), asms: () => S.asms, snapPoint: (...a) => snapPoint(...a), toggleDraftOpt: (...a) => toggleDraftOpt(...a), applyTheme: (...a) => applyTheme(...a), setDockTab: (...a) => setDockTab(...a), S, UI, applyT, setSelection, selMarks, copySel, pasteClip, duplicateSel, deleteSelected, combineCounts, selectAllPage, fxEval, pickerMode, fitPage, toScreen, detInfo: () => detState, hitTest, toPage, computeEstimate, geo, fmtFtIn, qtyFor, flush, setTool, SCALES, undo, redo, styleOf, bboxOf, setDockTab, printDrawing, renderOverlay, refreshPanel };
 
 if (/^https?:$/.test(location.protocol) && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => { reg.update().catch(() => { }); document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => { }); }); }).catch(() => { });
@@ -1887,7 +1866,7 @@ $('#btnVoice').onclick = voiceModal;
 
 /* ======================= v1.6: annotation markups (Bluebeam-style markup toolbar) ======================= */
 const rr2 = v => Math.round(v * 100) / 100;
-const annToolStyle = k => ({ ...(ANN_DEF[k] || SHAPE), ...((UI.ann || {})[k] || {}) });
+const annToolStyle = k => annToolStyleV18(k);
 function addNote(kind, pts, text = '') {
   pushUndo();
   const m = { id: uid(), type: 'note', kind, docId: S.docId, page: S.pageNum, pts: pts.map(p => [rr2(p[0]), rr2(p[1])]), text, style: annToolStyle(kind), label: '', created: Date.now() };
@@ -1929,19 +1908,527 @@ viewer.addEventListener('dblclick', e => {
   if (hit && !isQty(hit) && (hit.kind === 'text' || hit.kind === 'callout')) { S.selId = hit.id; renderOverlay(); refreshPanel(); editTextInPlace(hit, false); }
 });
 
+/* ======================= v1.8: snapping, guides, grid, theme, assemblies (wall types), openings ======================= */
+UI.snaps = { end: true, mid: true, int: true, perp: true, near: true, align: true, par: true, perpg: true, ...(UI.snaps || {}) };
+if (UI.osnap === false) { UI.snaps.end = false; UI.snaps.mid = false; }
+delete UI.osnap;
+if (UI.snap === undefined) UI.snap = true;
+if (UI.ceilAsm === undefined) UI.ceilAsm = 'asm-ceil';
+if (UI.soffitAsm === undefined) UI.soffitAsm = 'asm-soffit';
+UI.open = { t: 'door', w: 3, h: 7, ...(UI.open || {}) };
+const SNAP_NAMES = { end: 'Endpoint', mid: 'Midpoint', int: 'Intersection', perp: 'Perpendicular', near: 'On line', align: 'Aligned', par: 'Parallel', perpg: 'Perpendicular', grid: 'Grid' };
+const SNAP_PRI = { end: 0, int: 0.25, mid: 0.4, perp: 0.6, near: 0.8 };
+const snapOn = t => UI.snap !== false && (t === 'grid' ? !!UI.gsnap : UI.snaps[t] !== false);
+function footOn(p, a, b, strict) {   // closest point to p on segment ab (strict: null when the foot is past either end)
+  const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy; if (!L) return strict ? null : a.slice();
+  let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L; if (strict && (t < -1e-9 || t > 1 + 1e-9)) return null; t = clamp(t, 0, 1);
+  return [a[0] + t * dx, a[1] + t * dy];
+}
+function lineX(p, u, q, v) {   // intersection of the lines p + s·u and q + t·v
+  const den = u[0] * v[1] - u[1] * v[0]; if (Math.abs(den) < 1e-9 * (Math.hypot(...u) * Math.hypot(...v) || 1)) return null;
+  const s = ((q[0] - p[0]) * v[1] - (q[1] - p[1]) * v[0]) / den; return [p[0] + s * u[0], p[1] + s * u[1]];
+}
+function segX(s, r) {
+  const u = [s.b[0] - s.a[0], s.b[1] - s.a[1]], v = [r.b[0] - r.a[0], r.b[1] - r.a[1]], x = lineX(s.a, u, r.a, v); if (!x) return null;
+  const e = 1e-6; return segDist(x, s.a, s.b) < e && segDist(x, r.a, r.b) < e ? x : null;
+}
+const gridPt = () => { const k = curScale()?.ftPerPt; return k ? (UI.gridFt || 1) / k : 18; };
+function gridSVG(z, W = S.W, H = S.H, k = curScale()?.ftPerPt, pre = '', force = false) {
+  if (!(UI.grid || force) || !W) return '';
+  const minFt = UI.gridFt || 1, majFt = Math.max(UI.gridMajorFt || 5, minFt);
+  let mi = k ? minFt / k : 18, ma = k ? majFt / k : 18 * 5;
+  while (ma * z < 8) { ma *= 5; mi *= 5; }
+  const showMi = mi * z >= 5 && ma / mi > 1.01, sw = 0.6 / z, c = '#5b9bd5';
+  const pat = (id, g, op, w) => `<pattern id="${id}" patternUnits="userSpaceOnUse" width="${g}" height="${g}"><path d="M${g} 0H0V${g}" fill="none" stroke="${c}" stroke-opacity="${op}" stroke-width="${w}"/></pattern>`;
+  return `<g class="gridlayer" pointer-events="none"><defs>${showMi ? pat(pre + 'gridmi', mi, 0.28, sw) : ''}${pat(pre + 'gridma', ma, 0.6, sw * 1.6)}</defs>${showMi ? `<rect x="0" y="0" width="${W}" height="${H}" fill="url(#${pre}gridmi)"/>` : ''}<rect x="0" y="0" width="${W}" height="${H}" fill="url(#${pre}gridma)"/></g>`;
+}
+// v1.7.1: snap reach is a finger/cursor radius on screen, but never more than 2'-0" of real length (or 2% of the sheet
+// unscaled), so zoomed-out phone views don't grab far-away points; and never less than 8 screen px so it still works.
+function snapTol() {
+  const px = (COARSE ? 16 : 11) / S.z, k = curScale()?.ftPerPt, cap = k ? 2 / k : 0.02 * Math.max(S.W || 0, S.H || 0, 400);
+  return Math.max(8 / S.z, Math.min(px, cap));
+}
+function snapGeom() {   // snap points (ends / mids) and segments of everything on this page, plus the shape being drawn
+  const P = [], G = [];
+  const add = (a, b) => { if (dist(a, b) > 1e-6) { G.push({ a, b }); P.push({ p: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], t: 'mid' }); } }, pt = p => P.push({ p, t: 'end' });
+  for (const m of pageMarkups()) {
+    const p = m.pts || []; if (m.type === 'count' || m.kind === 'opening') continue;
+    if (!isQty(m) && ['rect', 'drect', 'ellipse', 'cloud'].includes(m.kind)) { const b = box2(p), C = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]]; C.forEach((c, i) => { pt(c); add(c, C[(i + 1) % 4]); }); continue; }
+    if (!isQty(m) && ['text', 'callout', 'highlight', 'pen'].includes(m.kind)) continue;
+    if (m.kind === 'dim') { p.slice(0, 2).forEach(pt); continue; }
+    p.forEach(pt); for (let i = 1; i < p.length; i++) add(p[i - 1], p[i]); if (m.type === 'area' && p.length > 2) add(p[p.length - 1], p[0]);
+    if (m.wall && p.length > 1) { const T = wallThkPt(m), cl = p.length > 3 && dist(p[0], p[p.length - 1]) < 1e-6; for (const s of [-T / 2, T / 2]) { const o = offsetLine(p, s, cl); o.forEach(pt); for (let i = 1; i < o.length; i++) add(o[i - 1], o[i]); } }
+  }
+  const d = S.drawing; if (d?.pts.length) { d.pts.forEach(q => P.push({ p: q, t: 'end', own: true })); for (let i = 1; i < d.pts.length; i++) G.push({ a: d.pts[i - 1], b: d.pts[i], own: true }); }
+  return { P, G };
+}
+function snapPoint(q, shift) {
+  S.snapHit = null;
+  const p0 = constrain(q, shift); if (UI.snap === false) return p0;
+  const tol = snapTol(), { P, G } = snapGeom(), d = S.drawing, last = d?.pts.length ? d.pts[d.pts.length - 1] : null, k = curScale()?.ftPerPt;
+  const ortho = !!(last && (shift || UI.ortho) && !(d.type === 'dim' && d.pts.length >= 2));
+  // 1. object snaps (they win over ortho, like CAD)
+  let best = null, bs = Infinity;
+  const cand = (p, t, ref) => { if (!snapOn(t)) return; const dd = dist(p, q); if (dd > tol) return; const s = dd + SNAP_PRI[t] * tol; if (s < bs) { bs = s; best = { p: p.slice(), type: t, ref }; } };
+  for (const o of P) if (o.p !== last) cand(o.p, o.t);
+  const near = G.filter(g => segDist(q, g.a, g.b) < tol * 1.5);
+  if (snapOn('int')) for (let i = 0; i < near.length; i++) for (let j = i + 1; j < near.length; j++) { const x = segX(near[i], near[j]); if (x) cand(x, 'int'); }
+  if (last && snapOn('perp')) for (const g of near) if (!g.own) { const f = footOn(last, g.a, g.b, true); if (f && dist(f, last) > 1e-6) cand(f, 'perp', g); }
+  if (best) { S.snapHit = { ...best, guides: [] }; return best.p; }
+  // 2. tracking guides: line up with ends (horizontal / vertical), parallel / perpendicular to nearby walls and lines
+  const lockX = ortho && p0[0] === last[0], lockY = ortho && p0[1] === last[1];
+  let gv = null, gh = null, gp = null;
+  if (snapOn('align')) for (const o of P) {
+    if (o.t !== 'end' || (ortho && o.p === last) || dist(o.p, p0) < tol) continue;
+    const dx = Math.abs(o.p[0] - p0[0]), dy = Math.abs(o.p[1] - p0[1]);
+    if (!lockX && dx < tol && (!gv || dx < gv.d)) gv = { d: dx, x: o.p[0], src: o.p };
+    if (!lockY && dy < tol && (!gh || dy < gh.d)) gh = { d: dy, y: o.p[1], src: o.p };
+  }
+  if (last && !ortho && (snapOn('par') || snapOn('perpg'))) {
+    const reach = Math.max(8 * tol, k ? 15 / k : 0), v = [p0[0] - last[0], p0[1] - last[1]];
+    if (Math.hypot(...v) > tol) for (const g of G) {
+      if (!g.own && segDist(p0, g.a, g.b) > reach && segDist(last, g.a, g.b) > reach) continue;
+      const L = dist(g.a, g.b), u = [(g.b[0] - g.a[0]) / L, (g.b[1] - g.a[1]) / L];
+      if (Math.abs(u[0]) < 1e-3 || Math.abs(u[1]) < 1e-3) continue;   // square to the sheet: ortho and alignment cover it
+      for (const [t, dir] of [['par', u], ['perpg', [-u[1], u[0]]]]) {
+        if (!snapOn(t)) continue;
+        const s = v[0] * dir[0] + v[1] * dir[1], f = [last[0] + dir[0] * s, last[1] + dir[1] * s], dd = dist(f, p0);
+        if (dd < tol && (!gp || dd < gp.d)) gp = { d: dd, t, dir, f, ref: g };
+      }
+    }
+  }
+  if (gv && gh && Math.hypot(gv.d, gh.d) < 1.5 * tol) { const x = [gv.x, gh.y]; S.snapHit = { p: x, type: 'align', guides: [{ a: gv.src, b: x }, { a: gh.src, b: x }] }; return x; }
+  const cons = gp ? { o: last, u: gp.dir } : lockX ? { o: last, u: [0, 1] } : lockY ? { o: last, u: [1, 0] } : gv ? { o: [gv.x, p0[1]], u: [0, 1] } : gh ? { o: [p0[0], gh.y], u: [1, 0] } : null;
+  const guideTo = x => gp ? [{ a: last, b: x }] : gv && !lockX ? [{ a: gv.src, b: x }] : gh && !lockY ? [{ a: gh.src, b: x }] : [];
+  // 3. on a line (nearest point, or where the guide / ortho line crosses it)
+  if (snapOn('near')) {
+    let nb = null, nd = tol;
+    for (const g of near) {
+      if (g.own) continue;
+      let x = null;
+      if (cons) { x = lineX(cons.o, cons.u, g.a, [g.b[0] - g.a[0], g.b[1] - g.a[1]]); if (x && segDist(x, g.a, g.b) > 1e-6) x = null; }
+      else x = footOn(p0, g.a, g.b);
+      if (x) { const dd = dist(x, p0); if (dd < nd) { nd = dd; nb = { x, g }; } }
+    }
+    if (nb) { S.snapHit = { p: nb.x, type: 'near', guides: guideTo(nb.x), ref: nb.g }; return nb.x; }
+  }
+  if (gp) { S.snapHit = { p: gp.f, type: gp.t, guides: [{ a: last, b: gp.f }], ref: gp.ref }; return gp.f.slice(); }
+  if (gv || gh) {
+    const useV = gv && (!gh || gv.d <= gh.d), x = useV ? [gv.x, p0[1]] : [p0[0], gh.y];
+    if (snapOn('grid')) { const g = gridPt(); if (useV && !lockY) x[1] = Math.round(x[1] / g) * g; if (!useV && !lockX) x[0] = Math.round(x[0] / g) * g; }
+    S.snapHit = { p: x, type: 'align', guides: [{ a: useV ? gv.src : gh.src, b: x }] }; return x;
+  }
+  if (snapOn('grid')) { const g = gridPt(), x = [lockX ? p0[0] : Math.round(p0[0] / g) * g, lockY ? p0[1] : Math.round(p0[1] / g) * g]; S.snapHit = { p: x, type: 'grid', guides: [] }; return x; }
+  return p0;
+}
+function snapMark() {
+  const h = S.snapHit; if (!h?.p) return '';
+  const z = S.z, s = 6 / z, [x, y] = h.p, c = '#ff7a00', w = 2 / z, M = '#e0389a', st = `fill="none" stroke="${c}" stroke-width="${w}"`;
+  let o = `<g class="snapmark" data-snap="${h.type}" pointer-events="none">`;
+  if (h.ref) o += `<line x1="${h.ref.a[0]}" y1="${h.ref.a[1]}" x2="${h.ref.b[0]}" y2="${h.ref.b[1]}" stroke="${M}" stroke-opacity=".45" stroke-width="${5 / z}" stroke-linecap="round"/>`;
+  for (const g of h.guides || []) {
+    const L = dist(g.a, g.b) || 1, u = [(g.b[0] - g.a[0]) / L, (g.b[1] - g.a[1]) / L], e = 60 / z;
+    o += `<line class="guide" x1="${g.a[0] - u[0] * e}" y1="${g.a[1] - u[1] * e}" x2="${g.b[0] + u[0] * e}" y2="${g.b[1] + u[1] * e}" stroke="${M}" stroke-width="${1.4 / z}" stroke-dasharray="${6 / z} ${4 / z}"/><circle cx="${g.a[0]}" cy="${g.a[1]}" r="${3 / z}" fill="${M}"/>`;
+  }
+  const shp = {
+    end: `<rect x="${x - s}" y="${y - s}" width="${2 * s}" height="${2 * s}" ${st}/>`,
+    mid: `<path d="M${x} ${y - s * 1.2}L${x + s * 1.1} ${y + s * 0.8}L${x - s * 1.1} ${y + s * 0.8}Z" ${st}/>`,
+    int: `<path d="M${x - s} ${y - s}L${x + s} ${y + s}M${x + s} ${y - s}L${x - s} ${y + s}" ${st}/>`,
+    perp: `<path d="M${x - s} ${y + s}H${x + s}M${x - s * 0.4} ${y + s}V${y - s}" ${st}/>`,
+    near: `<path d="M${x - s} ${y - s}H${x + s}L${x - s} ${y + s}H${x + s}Z" ${st}/>`,
+    align: `<circle cx="${x}" cy="${y}" r="${s * 0.7}" ${st}/><path d="M${x - s * 1.4} ${y}H${x + s * 1.4}M${x} ${y - s * 1.4}V${y + s * 1.4}" fill="none" stroke="${c}" stroke-width="${w * 0.6}"/>`,
+    par: `<path d="M${x - s} ${y + s * 0.4}L${x - s * 0.2} ${y - s}M${x + s * 0.2} ${y + s}L${x + s} ${y - s * 0.4}" ${st}/>`,
+    grid: `<path d="M${x - s} ${y}H${x + s}M${x} ${y - s}V${y + s}" ${st}/>`,
+  };
+  o += shp[h.type] || shp[h.type === 'perpg' ? 'perp' : 'end'];
+  const lab = SNAP_NAMES[h.type] || h.type, fs = 11 / z, tx = x + 12 / z, ty = y - 14 / z, tw = lab.length * fs * 0.6 + 8 / z;
+  o += `<rect x="${tx}" y="${ty - fs}" width="${tw}" height="${fs * 1.45}" rx="${3 / z}" fill="#fff" fill-opacity=".92" stroke="${c}" stroke-width="${1 / z}"/><text class="snaplbl" x="${tx + 4 / z}" y="${ty}" font-size="${fs}" fill="#b34700" font-family="system-ui, Arial, sans-serif" font-weight="600">${lab}</text>`;
+  return o + '</g>';
+}
+function toggleDraftOpt(k) {
+  let on;
+  if (k.startsWith('s:')) { const t = k.slice(2); if (t === 'grid') on = UI.gsnap = !UI.gsnap; else on = UI.snaps[t] = UI.snaps[t] === false; }
+  else if (k === 'snap') on = UI.snap = UI.snap === false;
+  else on = UI[k] = !UI[k];
+  saveUI(); applyTheme(); renderOverlay(); renderDock(true); syncSnapBar();
+  const nm = k.startsWith('s:') ? (k === 's:grid' ? 'Snap to grid' : 'Snap: ' + SNAP_NAMES[k.slice(2)]) : ({ grid: 'Grid', gsnap: 'Snap to grid', ortho: 'Ortho', snap: 'Snap', darkSheet: 'Dark sheet view' }[k] || k);
+  toast(`${nm} ${on ? 'on' : 'off'}`, 1200);
+}
+function syncSnapBar() {
+  const t = (id, on) => $(id)?.classList.toggle('on', !!on);
+  t('#btnSnap', UI.snap !== false); t('#btnOrtho', UI.ortho); t('#btnGrid', UI.grid); t('#btnDarkSheet', UI.darkSheet);
+}
+/* ---- theme: dark / light / system; the drawing sheet stays white unless "dark sheet" is on; prints are always light ---- */
+const THEME_NAMES = { dark: '☾ Dark', light: '☀ Light', system: '◐ Auto' };
+function applyTheme() {
+  const t = UI.theme || 'dark', eff = t === 'system' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : t;
+  document.documentElement.dataset.theme = eff;
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', eff === 'light' ? '#ffffff' : '#1c2126');
+  $('#viewer')?.classList.toggle('darksheet', !!UI.darkSheet);
+  const b = $('#btnTheme'); if (b) { b.textContent = THEME_NAMES[t] || THEME_NAMES.dark; b.title = `Theme: ${t} (tap to change: dark → light → follow the system)`; }
+}
+matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', () => { if (UI.theme === 'system') applyTheme(); });
+$('#btnTheme') && ($('#btnTheme').onclick = () => { const o = ['dark', 'light', 'system']; UI.theme = o[(o.indexOf(UI.theme || 'dark') + 1) % 3]; saveUI(); applyTheme(); toast('Theme: ' + UI.theme, 1200); });
+$('#btnSnap') && ($('#btnSnap').onclick = () => toggleDraftOpt('snap'));
+$('#btnOrtho') && ($('#btnOrtho').onclick = () => toggleDraftOpt('ortho'));
+$('#btnGrid') && ($('#btnGrid').onclick = () => toggleDraftOpt('grid'));
+$('#btnDarkSheet') && ($('#btnDarkSheet').onclick = () => toggleDraftOpt('darkSheet'));
+applyTheme(); syncSnapBar();
+
+/* ---- assemblies (wall types): a template of components, each with a quantity formula on the wall's LF, height, sides and openings ---- */
+const ASM_KINDS = { wall: 'Wall type', ceiling: 'Ceiling', soffit: 'Soffit' };
+const ASM_NOTE = 'Example rates — not local prices; edit to match yours';
+const ASM_VARS_HELP = {
+  wall: 'LF (wall length), H (height ft), SIDES (boarded faces), AREA = LF×H, OPEN (opening SF), OPENW (opening widths, ft), NOPEN, NDOOR, NWIN, NET = AREA − OPEN, BOARD = NET × SIDES, CORNERS (turns in the wall), OUTC, BEADLF, OC (stud spacing, in)',
+  ceiling: 'AREA (SF), PERIM / LF (perimeter), BOARD = NET = AREA, BEADLF, OC (framing spacing, in)',
+  soffit: 'LF (soffit length), W (width ft), D (drop ft), SIDES (drops boarded), AREA = LF×W, BOARD = LF×(W + SIDES×D), BEADLF = LF×SIDES, OC',
+};
+const C = (id, name, unit, f, price = 0, labor = 0, waste = 0, round = true, on = true) => ({ id, name, unit, f, price, labor, waste, round, on });
+function ASM_DEFAULTS() {
+  const finish = (sht, shtName, shtPrice, scrRate, lh, lf) => [
+    C('gwb', shtName, 'SHT', sht, shtPrice, 0, 10, true),
+    C('scr', 'Drywall screws', 'LB', `BOARD / 1000 * ${scrRate}`, 7.5, 0, 5, true),
+    C('mud', 'Joint compound (4.5 gal)', 'BKT', 'BOARD / 250', 19, 0, 0, true),
+    C('tape', 'Joint tape (500\')', 'ROLL', 'BOARD / 1300', 5, 0, 0, true),
+    C('bead', 'Corner bead', 'LF', 'BEADLF', 0.45, 0, 10, false),
+  ];
+  const base = { builtin: true, note: ASM_NOTE };
+  return [
+    { ...base, id: 'asm-2x4', kind: 'wall', name: '2x4 interior, 1/2" drywall both sides', sides: 2, oc: 16, h: 9, wall: { preset: 'w2x4', core: 3.5, gwb: 0.5 }, style: { hatch: 'stud' }, comps: [
+      ...finish('BOARD / 32', '1/2" drywall 4x8', 14, 4),
+      C('stud', '2x4 stud 8\'/9\'', 'EA', 'ceil(LF * 12 / OC) + 1 + 2 * CORNERS', 4.5, 0, 5, true),
+      C('kj', 'King / jack studs', 'EA', '4 * NOPEN', 4.5, 0, 0, true),
+      C('hdr', 'Header 2x (doubled)', 'LF', '2 * (OPENW + 0.5 * NOPEN)', 1.1, 0, 10, false),
+      C('plate', 'Plates 2x4 (top + bottom)', 'LF', 'LF * 2', 0.7, 0, 10, false),
+      C('ins', 'Sound batt (optional)', 'SF', 'NET', 0.65, 0, 5, false, false),
+      C('lfr', 'Framing labor', 'LF', 'LF', 0, 4, 0, false),
+      C('lhg', 'Hang labor', 'SF', 'BOARD', 0, 0.4, 0, false),
+      C('lfn', 'Tape & finish labor (L4)', 'SF', 'BOARD', 0, 0.55, 0, false),
+    ] },
+    { ...base, id: 'asm-m358', kind: 'wall', name: '3-5/8" metal stud 25ga, 5/8" Type X both sides', sides: 2, oc: 16, h: 9, wall: { preset: 'm358', core: 3.625, gwb: 0.625 }, style: { hatch: 'insul' }, comps: [
+      C('gwb', '5/8" Type X 4x12', 'SHT', 'BOARD / 48', 23, 0, 10, true),
+      C('scr', 'Drywall screws (fine)', 'LB', 'BOARD / 1000 * 4', 8, 0, 5, true),
+      C('mud', 'Joint compound (4.5 gal)', 'BKT', 'BOARD / 250', 19, 0, 0, true),
+      C('tape', 'Joint tape (500\')', 'ROLL', 'BOARD / 1300', 5, 0, 0, true),
+      C('bead', 'Corner bead', 'LF', 'BEADLF', 0.45, 0, 10, false),
+      C('stud', '3-5/8" 25ga stud', 'EA', 'ceil(LF * 12 / OC) + 1 + 2 * CORNERS', 6.5, 0, 5, true),
+      C('kj', 'King / jack studs', 'EA', '4 * NOPEN', 6.5, 0, 0, true),
+      C('hdr', 'Header track', 'LF', 'OPENW + NOPEN', 1.2, 0, 10, false),
+      C('trk', '3-5/8" track (top + bottom)', 'LF', 'LF * 2', 1.1, 0, 10, false),
+      C('ins', 'Sound batt (optional)', 'SF', 'NET', 0.65, 0, 5, false, false),
+      C('lfr', 'Framing labor', 'LF', 'LF', 0, 5, 0, false),
+      C('lhg', 'Hang labor', 'SF', 'BOARD', 0, 0.45, 0, false),
+      C('lfn', 'Tape & finish labor (L4)', 'SF', 'BOARD', 0, 0.55, 0, false),
+    ] },
+    { ...base, id: 'asm-w2x6ext', kind: 'wall', name: '2x6 exterior, 1/2" drywall inside', sides: 1, oc: 16, h: 9, wall: { preset: 'w2x6', core: 5.5, gwb: 0.5 }, style: { hatch: 'stud' }, comps: [
+      ...finish('BOARD / 32', '1/2" drywall 4x8', 14, 4),
+      C('stud', '2x6 stud', 'EA', 'ceil(LF * 12 / OC) + 1 + 2 * CORNERS', 7, 0, 5, true),
+      C('kj', 'King / jack studs', 'EA', '4 * NOPEN', 7, 0, 0, true),
+      C('hdr', 'Header 2x (doubled)', 'LF', '2 * (OPENW + 0.5 * NOPEN)', 2, 0, 10, false),
+      C('plate', 'Plates 2x6 (bottom + double top)', 'LF', 'LF * 3', 1, 0, 10, false),
+      C('ins', 'R-19/21 batt insulation', 'SF', 'NET', 0.95, 0, 5, false),
+      C('lfr', 'Framing labor', 'LF', 'LF', 0, 6, 0, false),
+      C('lhg', 'Hang labor', 'SF', 'BOARD', 0, 0.4, 0, false),
+      C('lfn', 'Tape & finish labor (L4)', 'SF', 'BOARD', 0, 0.55, 0, false),
+    ] },
+    { ...base, id: 'asm-shaft', kind: 'wall', name: 'Shaft wall (optional): 1" liner + 2 layers 5/8" Type X, CH-stud — verify against the listed assembly', sides: 1, oc: 24, h: 9, wall: { preset: 'custom', core: 3.5, gwb: 1.25 }, style: { hatch: 'insul' }, comps: [
+      C('liner', '1" shaftliner 2x8', 'SHT', 'NET / 16', 31, 0, 10, true),
+      C('gwb', '5/8" Type X 4x12 (2 layers)', 'SHT', 'BOARD * 2 / 48', 23, 0, 10, true),
+      C('stud', '2-1/2" CH-stud', 'EA', 'ceil(LF * 12 / OC) + 1', 9, 0, 5, true),
+      C('jt', 'J-track (top + bottom)', 'LF', 'LF * 2', 2, 0, 10, false),
+      C('scr', 'Drywall screws', 'LB', 'BOARD * 2 / 1000 * 4', 7.5, 0, 5, true),
+      C('mud', 'Joint compound (4.5 gal)', 'BKT', 'BOARD / 250', 19, 0, 0, true),
+      C('tape', 'Joint tape (500\')', 'ROLL', 'BOARD / 1300', 5, 0, 0, true),
+      C('lfr', 'Framing labor', 'LF', 'LF', 0, 9.5, 0, false),
+      C('lhg', 'Hang labor (2 layers + liner)', 'SF', 'BOARD * 2', 0, 0.48, 0, false),
+      C('lfn', 'Tape & finish labor', 'SF', 'BOARD', 0, 0.55, 0, false),
+    ] },
+    { ...base, id: 'asm-ceil', kind: 'ceiling', name: 'Drywall ceiling, 1/2" sag-resistant on furring', sides: 1, oc: 16, style: {}, comps: [
+      C('gwb', '1/2" ceiling board 4x12', 'SHT', 'BOARD / 48', 17, 0, 10, true),
+      C('scr', 'Drywall screws', 'LB', 'BOARD / 1000 * 5', 7.5, 0, 5, true),
+      C('mud', 'Joint compound (4.5 gal)', 'BKT', 'BOARD / 220', 19, 0, 0, true),
+      C('tape', 'Joint tape (500\')', 'ROLL', 'BOARD / 1300', 5, 0, 0, true),
+      C('fur', 'Furring channel / strapping', 'LF', 'AREA * 12 / OC', 0.6, 0, 10, false),
+      C('trim', 'Perimeter trim / L-bead', 'LF', 'PERIM', 0.5, 0, 10, false),
+      C('bead', 'Corner bead', 'LF', 'BEADLF', 0.45, 0, 10, false),
+      C('lfr', 'Framing labor', 'SF', 'AREA', 0, 1.1, 0, false),
+      C('lhg', 'Hang labor (overhead)', 'SF', 'BOARD', 0, 0.55, 0, false),
+      C('lfn', 'Tape & finish labor', 'SF', 'BOARD', 0, 0.6, 0, false),
+    ] },
+    { ...base, id: 'asm-soffit', kind: 'soffit', name: 'Soffit / bulkhead, 1/2" drywall', sides: 1, oc: 16, w: 2, d: 1.5, style: { hatch: 'stud' }, comps: [
+      C('gwb', '1/2" drywall 4x8', 'SHT', 'BOARD / 32', 14, 0, 15, true),
+      C('scr', 'Drywall screws', 'LB', 'BOARD / 1000 * 5', 7.5, 0, 5, true),
+      C('mud', 'Joint compound (4.5 gal)', 'BKT', 'BOARD / 200', 19, 0, 0, true),
+      C('tape', 'Joint tape (500\')', 'ROLL', 'BOARD / 1000', 5, 0, 0, true),
+      C('bead', 'Corner bead', 'LF', 'BEADLF', 0.45, 0, 10, false),
+      C('trk', 'Track', 'LF', 'LF * (2 + SIDES)', 0.9, 0, 10, false),
+      C('stud', 'Studs / hangers', 'EA', 'ceil((LF * 12 / OC + 1) * (1 + SIDES))', 4, 0, 5, true),
+      C('lfr', 'Framing labor', 'LF', 'LF', 0, 8, 0, false),
+      C('lhg', 'Hang labor', 'SF', 'BOARD', 0, 0.55, 0, false),
+      C('lfn', 'Tape & finish labor', 'SF', 'BOARD', 0, 0.65, 0, false),
+    ] },
+  ];
+}
+S.asms = ASM_DEFAULTS();
+async function loadAsms() {
+  try { const r = await DB.get('meta', 'assemblies'); if (r?.list?.length) { const have = new Set(r.list.map(a => a.id)); return [...r.list, ...ASM_DEFAULTS().filter(a => !have.has(a.id))]; } } catch (e) { console.warn(e); }
+  return ASM_DEFAULTS();
+}
+let asmTimer = 0;
+function saveAsms() { clearTimeout(asmTimer); asmTimer = setTimeout(() => DB.put('meta', { id: 'assemblies', list: S.asms }).catch(e => console.warn(e)), 250); }
+const asmById = id => (id && S.asms.find(a => a.id === id)) || null;
+const asmOf = m => (m && m.asm && isQty(m) && asmById(m.asm)) || null;
+const openingsOf = m => (S.project?.markups || []).filter(o => o.type === 'note' && o.kind === 'opening' && o.wallId === m.id);
+function openArea(m) { let s = 0; for (const o of openingsOf(m)) s += (+o.ow || 0) * (+o.oh || 0); return s; }
+function turnCount(P) {   // corners along a wall run (direction changes over ~10°), including the closing corner of a room
+  const closed = P.length > 3 && dist(P[0], P[P.length - 1]) < 1e-6, Q = closed ? P.slice(0, -1) : P, n = Q.length; let c = 0;
+  for (let i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) {
+    const a = Q[(i - 1 + n) % n], b = Q[i], e = Q[(i + 1) % n], u = [b[0] - a[0], b[1] - a[1]], v = [e[0] - b[0], e[1] - b[1]], L = Math.hypot(...u) * Math.hypot(...v);
+    if (L && Math.abs(u[0] * v[1] - u[1] * v[0]) / L > 0.17) c++;
+  }
+  return c;
+}
+function asmVars(m, a = asmOf(m)) {
+  if (!a) return null; const g = geo(m); if (g.noscale) return null;
+  const P = m.asmP || {}, oc = +a.oc > 0 ? +a.oc : 16, bead = P.bead != null && P.bead !== '' ? +P.bead : null;
+  if (m.type === 'area') { const A = g.sf || 0; return { AREA: A, PERIM: g.lf || 0, LF: g.lf || 0, H: 0, W: 0, D: 0, SIDES: 1, OPEN: 0, OPENW: 0, NOPEN: 0, NDOOR: 0, NWIN: 0, NET: A, BOARD: A, CORNERS: 0, OUTC: 0, BEADLF: bead ?? 0, OC: oc }; }
+  const LF = g.lf || 0;
+  if (a.kind === 'soffit') {
+    const W = num(P.w ?? a.w, 2), D = num(P.d ?? a.d, 1.5), SD = num(P.sides ?? a.sides, 1), A = LF * W;
+    return { LF, W, D, SIDES: SD, H: D, AREA: A, PERIM: LF, OPEN: 0, OPENW: 0, NOPEN: 0, NDOOR: 0, NWIN: 0, NET: A, BOARD: LF * (W + SD * D), CORNERS: turnCount(m.pts), OUTC: 0, BEADLF: bead ?? LF * SD, OC: oc };
+  }
+  const H = m.height > 0 ? +m.height : (+a.h || 9), SD = num(a.sides, 2), AREA = LF * H, ops = openingsOf(m);
+  let OPEN = 0, OPENW = 0, ND = 0, NW = 0; for (const o of ops) { OPEN += (+o.ow || 0) * (+o.oh || 0); OPENW += +o.ow || 0; if (o.ot === 'window') NW++; else ND++; }
+  OPEN = Math.min(OPEN, AREA); const NET = AREA - OPEN, CORNERS = turnCount(m.pts), OUTC = SD >= 2 ? CORNERS : 0;
+  return { LF, H, W: 0, D: 0, SIDES: SD, AREA, PERIM: LF, OPEN, OPENW, NOPEN: ops.length, NDOOR: ND, NWIN: NW, NET, BOARD: NET * SD, CORNERS, OUTC, BEADLF: bead ?? OUTC * H, OC: oc };
+}
+function asmCompQty(c, V) { try { const q = fxEval(String(c.f || '0'), V); return isFinite(q) ? Math.max(0, q) : NaN; } catch { return NaN; } }
+function asmLine(c, q) { const w = num(c.waste), raw = q * (1 + w / 100), qtyW = c.round ? Math.ceil(raw - 1e-9) : raw, price = num(c.price), laborU = num(c.labor); return { q, waste: w, qtyW, price, laborU, mat: qtyW * price, labor: qtyW * laborU, total: qtyW * (price + laborU) }; }
+function asmBreakdown(m, a = asmOf(m)) {
+  const V = asmVars(m, a); if (!V) return null;
+  const rows = a.comps.filter(c => c.on !== false).map(c => { const q = asmCompQty(c, V); return { c, err: !isFinite(q), ...asmLine(c, isFinite(q) ? q : 0) }; });
+  const t = rows.reduce((s, r) => ({ mat: s.mat + r.mat, labor: s.labor + r.labor, total: s.total + r.total }), { mat: 0, labor: 0, total: 0 });
+  return { V, rows, a, ...t };
+}
+function asmEstimateLines(P) {   // estimate lines grouped by assembly: quantities summed over every markup of that type, then waste and round-up
+  const groups = new Map(); let noScale = 0;
+  for (const m of P.markups) {
+    const a = asmOf(m); if (!a) continue; const V = asmVars(m, a); if (!V) { noScale++; continue; }
+    const g = groups.get(a.id) || { a, n: 0, q: {} }; g.n++;
+    for (const c of a.comps) if (c.on !== false) { const q = asmCompQty(c, V); if (isFinite(q)) g.q[c.id] = (g.q[c.id] || 0) + q; }
+    groups.set(a.id, g);
+  }
+  const lines = [];
+  for (const g of groups.values()) for (const c of g.a.comps) {
+    if (c.on === false) continue; const q = g.q[c.id] || 0; if (!(q > 0)) continue;
+    const L = asmLine(c, q);
+    lines.push({ kind: 'asm', id: g.a.id + ':' + c.id, asmId: g.a.id, name: c.name, category: `${ASM_KINDS[g.a.kind] || 'Assembly'}: ${g.a.name}`, unit: c.unit || 'EA', qty: q, waste: L.waste, qtyW: L.qtyW, price: L.price, mat: L.mat, laborU: L.laborU, labor: L.labor, total: L.total, n: g.n, color: asmColor(g.a) });
+  }
+  return { lines, noScale };
+}
+const asmColor = a => a.style?.color || { wall: '#333333', ceiling: '#7a5cff', soffit: '#c77d00' }[a.kind] || '#555';
+const ASM_DRAW = { ceiling: 'area', soffit: 'length' };
+const ASM_TOOL_NAMES = { ceiling: 'Ceiling', soffit: 'Soffit', opening: 'Opening' };
+const isAsmTool = t => t === 'ceiling' || t === 'soffit' || t === 'opening';
+Object.assign(NOTE_NAMES, { opening: 'Opening' });
+Object.assign(HINTS, {
+  opening: 'Opening: tap on a wall to place a door or window (size in the Draw panel). Its area comes off the wall board.',
+  ceiling: 'Ceiling: tap the corners of the ceiling like an area. It gets the ceiling assembly picked in the Draw panel.',
+  soffit: 'Soffit: tap along the soffit run like a length. Width, drop and sides are set in the Assembly tab.',
+});
+/* ---- openings (doors / windows on a wall) ---- */
+function nearestWall(q) {
+  const tol = snapTol(); let best = null, bd = Infinity;
+  for (const m of pageMarkups()) {
+    if (!m.wall || m.type !== 'length' || m.pts.length < 2) continue; const r = wallThkPt(m) / 2 + 1.5 * tol;
+    for (let i = 1; i < m.pts.length; i++) { const d = segDist(q, m.pts[i - 1], m.pts[i]); if (d < r && d < bd) { bd = d; best = { m, p: footOn(q, m.pts[i - 1], m.pts[i]) }; } }
+  }
+  return best;
+}
+function openingGeo(o) {
+  const w = o.wallId && S.project?.markups.find(x => x.id === o.wallId && x.wall), k = kOf(o), wp = k ? (+o.ow || 3) / k : 36, c0 = o.pts[0];
+  if (!w || w.pts.length < 2) return { orphan: true, c: c0, u: [1, 0], n: [0, 1], wp, T: k ? 0.4 / k : 6 };
+  let best = null, bd = Infinity;
+  for (let i = 1; i < w.pts.length; i++) { const d = segDist(c0, w.pts[i - 1], w.pts[i]); if (d < bd) { bd = d; best = [w.pts[i - 1], w.pts[i]]; } }
+  const [a, b] = best, L = dist(a, b) || 1, u = [(b[0] - a[0]) / L, (b[1] - a[1]) / L];
+  let t = (c0[0] - a[0]) * u[0] + (c0[1] - a[1]) * u[1]; t = L > wp ? clamp(t, wp / 2, L - wp / 2) : L / 2;
+  return { c: [a[0] + u[0] * t, a[1] + u[1] * t], u, n: [-u[1], u[0]], wp, T: wallThkPt(w), wall: w };
+}
+function openingPoly(G, o) { const h2 = G.wp / 2, t2 = G.T / 2, P = (s, t) => [G.c[0] + G.u[0] * s + G.n[0] * t, G.c[1] + G.u[1] * s + G.n[1] * t], sg = o.flip ? -1 : 1, sw = o.ot === 'window' ? 0 : G.wp; return [P(-h2, -t2 - (sg < 0 ? sw : 0)), P(h2, -t2 - (sg < 0 ? sw : 0)), P(h2, t2 + (sg > 0 ? sw : 0)), P(-h2, t2 + (sg > 0 ? sw : 0))]; }
+function openingSVG(m, st, z) {
+  const G = openingGeo(m), c = st.color || '#222222', lw = Math.max(+st.width || 1, 0.8 / z), h2 = G.wp / 2, T = G.T, sg = m.flip ? -1 : 1;
+  const P = (s, t) => [G.c[0] + G.u[0] * s + G.n[0] * t, G.c[1] + G.u[1] * s + G.n[1] * t], ln = (a, b, w = lw, ex = '') => `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="${c}" stroke-width="${w}"${ex}/>`;
+  const k = kOf(m), lab = `${m.ot === 'window' ? 'W' : 'D'} ${fmtFtIn(+m.ow || 0)} × ${fmtFtIn(+m.oh || 0)}`;
+  if (G.orphan) { const b = [P(-h2, -T / 2), P(h2, -T / 2), P(h2, T / 2), P(-h2, T / 2)]; return `<polygon points="${pp(b)}" fill="none" stroke="${c}" stroke-width="${lw}" stroke-dasharray="${4 / z} ${3 / z}"/><text x="${G.c[0]}" y="${G.c[1] - T}" font-size="${Math.max(G.wp * 0.18, 4)}" fill="${c}" text-anchor="middle" font-family="system-ui, Arial, sans-serif">${esc(lab)} (no wall)</text>`; }
+  let h = `<polygon points="${pp([P(-h2, -T / 2 - lw), P(h2, -T / 2 - lw), P(h2, T / 2 + lw), P(-h2, T / 2 + lw)])}" fill="#fff" stroke="none"/>`;
+  h += ln(P(-h2, -T / 2), P(-h2, T / 2)) + ln(P(h2, -T / 2), P(h2, T / 2));
+  if (m.ot === 'window') h += ln(P(-h2, -T / 2), P(h2, -T / 2), lw * 0.7) + ln(P(-h2, T / 2), P(h2, T / 2), lw * 0.7) + ln(P(-h2, 0), P(h2, 0), lw * 0.5);
+  else {
+    const hinge = P(-h2, sg * T / 2), leaf = P(-h2, sg * (T / 2 + G.wp)), strike = P(h2, sg * T / 2);
+    const a1 = Math.atan2(leaf[1] - hinge[1], leaf[0] - hinge[0]), a2 = Math.atan2(strike[1] - hinge[1], strike[0] - hinge[0]); let da = a2 - a1; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
+    h += ln(hinge, leaf, lw * 0.9) + `<path d="M${leaf[0]} ${leaf[1]}A${G.wp} ${G.wp} 0 0 ${da > 0 ? 1 : 0} ${strike[0]} ${strike[1]}" fill="none" stroke="${c}" stroke-width="${lw * 0.6}" stroke-dasharray="${3 / z} ${2 / z}"/>`;
+  }
+  let ang = Math.atan2(G.u[1], G.u[0]) * 180 / Math.PI; if (ang > 90.01) ang -= 180; else if (ang < -89.99) ang += 180;
+  const fs = Math.max(Math.min(G.wp * 0.2, k ? 0.9 / k : 12), 3), lp = P(0, -sg * (T / 2 + fs * 0.9));
+  h += `<text x="${lp[0]}" y="${lp[1]}" font-size="${fs}" fill="${c}" text-anchor="middle" dominant-baseline="middle" font-family="system-ui, Arial, sans-serif" stroke="#fff" stroke-width="${fs * 0.2}" paint-order="stroke" transform="rotate(${ang} ${lp[0]} ${lp[1]})">${esc(lab)}</text>`;
+  return h;
+}
+const openingBox = m => { const G = openingGeo(m); return box2(openingPoly(G, m)); };
+const openingDist = (m, q) => { const G = openingGeo(m); return inPoly(q, openingPoly(G, m)) ? -0.5 : Infinity; };
+function placeOpening(q, wallM) {
+  const hit = wallM ? { m: wallM, p: q } : nearestWall(q);
+  if (!hit) { toast('Tap on a wall to place the opening'); return null; }
+  const o = UI.open, n = addNote('opening', [hit.p]);
+  n.wallId = hit.m.id; n.ot = o.t === 'window' ? 'window' : 'door'; n.ow = +o.w > 0 ? +o.w : 3; n.oh = +o.h > 0 ? +o.h : (n.ot === 'door' ? 7 : 4); n.style = { color: '#222222', width: 1 };
+  touch(); renderOverlay(); refreshPanel(); renderDock(true);
+  toast(`${n.ot === 'window' ? 'Window' : 'Door'} ${fmtFtIn(n.ow)} × ${fmtFtIn(n.oh)} on ${markName(hit.m)}`, 1600); return n;
+}
+function openingGhost() {
+  const q = S.opHover; if (!q) return ''; const hit = nearestWall(q), z = S.z;
+  if (!hit) return `<text x="${q[0] + 12 / z}" y="${q[1] - 12 / z}" font-size="${12 / z}" fill="#e0389a" font-family="system-ui, Arial, sans-serif">tap a wall</text>`;
+  const o = UI.open, g = { type: 'note', kind: 'opening', docId: S.docId, page: S.pageNum, pts: [hit.p], wallId: hit.m.id, ot: o.t, ow: o.w, oh: o.h };
+  return `<g opacity=".65">${openingSVG(g, { color: '#e0389a', width: 1.2 }, z)}</g>`;
+}
+/* ---- bigger, editable text / callout defaults ---- */
+function annToolStyleV18(k) {
+  const o = { ...(ANN_DEF[k] || SHAPE) };
+  if (k === 'text' || k === 'callout') { o.fs = Math.round(clamp(Math.max(S.W || 0, S.H || 0) / 60, 24, 72)); o.pad = 0.4; if (k === 'callout') { o.width = 3; o.head = 1.4; } }
+  if (k === 'opening') Object.assign(o, { color: '#222222', width: 1 });
+  return { ...o, ...((UI.ann || {})[k] || {}) };
+}
+/* ---- the Assembly tab in the bottom dock ---- */
+const asmOpts = (kinds, cur) => S.asms.filter(a => kinds.includes(a.kind)).map(a => `<option value="${a.id}" ${a.id === cur ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
+function asmHeadline(B) {
+  const V = B.V, a = B.a;
+  if (a.kind === 'ceiling' || V.W === 0 && a.kind !== 'wall' && a.kind !== 'soffit') return `Area ${fmtN(V.AREA)} SF · perimeter ${fmtN(V.PERIM)} LF · board <b>${fmtN(V.BOARD)} SF</b> before waste`;
+  if (a.kind === 'soffit') return `LF ${fmtN(V.LF)} · W ${fmtFtIn(V.W)} · D ${fmtFtIn(V.D)} · ${V.SIDES} side${V.SIDES === 1 ? '' : 's'} · board <b>${fmtN(V.BOARD)} SF</b> before waste`;
+  return `LF ${fmtN(V.LF)} · H ${fmtFtIn(V.H)} · ${V.SIDES} side${V.SIDES === 1 ? '' : 's'} · openings ${fmtN(V.OPEN)} SF (${V.NOPEN}) · board <b>${fmtN(V.BOARD)} SF</b> before waste`;
+}
+function breakdownHTML(m, a) {
+  const B = asmBreakdown(m, a); if (!B) return '<p class="muted small">Set the page scale to price this assembly.</p>';
+  const rows = B.rows.map(r => `<tr data-comp="${esc(r.c.id)}"${r.err ? ' class="err"' : ''}><td>${esc(r.c.name)}</td><td class="fxf"><code>${esc(r.c.f)}</code></td><td class="n">${r.err ? '⚠' : fmtN(r.q, 2)}</td><td>${esc(r.c.unit)}</td><td class="n">${fmtN(r.waste, r.waste % 1 ? 1 : 0)}%</td><td class="n"><b>${fmtN(r.qtyW, r.c.round ? 0 : 2)}</b></td><td class="n">${fmt$(r.price)}</td><td class="n">${fmt$(r.mat)}</td><td class="n">${fmt$(r.laborU)}</td><td class="n">${fmt$(r.labor)}</td><td class="n"><b>${fmt$(r.total)}</b></td></tr>`).join('');
+  return `<div class="asmHead small" data-board="${+B.V.BOARD.toFixed(4)}">${asmHeadline(B)}</div>
+    <div class="tscroll"><table class="fxT asmT"><thead><tr><th>Item</th><th>Formula</th><th class="n">Qty</th><th>Unit</th><th class="n">Waste</th><th class="n">Qty w/ waste</th><th class="n">Unit $</th><th class="n">Material</th><th class="n">Labor/unit</th><th class="n">Labor</th><th class="n">Total</th></tr></thead>
+    <tbody>${rows}</tbody><tfoot><tr><td colspan="7">Totals for this ${a.kind === 'wall' ? 'wall' : a.kind}</td><td class="n" data-tot="mat">${fmt$(B.mat)}</td><td></td><td class="n" data-tot="labor">${fmt$(B.labor)}</td><td class="n" data-tot="total"><b>${fmt$(B.total)}</b></td></tr></tfoot></table></div>
+    <p class="muted small">${esc(a.note || ASM_NOTE)}. Edit components and prices with nothing selected (Assembly tab → library).</p>`;
+}
+function dockAsm(body) {
+  if (!S.project) { body.innerHTML = '<p class="muted small">Open a project first.</p>'; return; }
+  const q = selMarks().filter(x => isQty(x) && x.type !== 'count'), m = q.find(x => x.id === S.selId) || q[0];
+  if (m && S.asmView !== 'lib') return asmMarkPanel(body, m);
+  asmLibPanel(body, m);
+}
+function asmMarkPanel(body, m) {
+  const A = asmOf(m), kinds = m.type === 'area' ? ['ceiling'] : m.wall ? ['wall'] : ['soffit'], P = m.asmP || {};
+  let h = `<div class="dgrid"><div class="dcol">
+    <div class="dhead"><b>Assembly</b><span class="muted small">${esc(markName(m))}</span><button class="small" id="amLib">Wall type library</button></div>
+    <label class="field"><span>${m.type === 'area' ? 'Ceiling assembly' : m.wall ? 'Wall type' : 'Soffit assembly'}</span><select id="amSel"><option value="">— None —</option>${asmOpts(kinds, m.asm)}</select></label>`;
+  if (!A && !m.wall && m.type === 'length') h += `<p class="muted small">Soffits are lengths. Walls have their own wall types; draw them with the Wall tool.</p>`;
+  if (A) {
+    if (m.productId) h += `<p class="small warn">This markup also has a product (${esc(prodById(m.productId)?.name || '')}). Both count in the estimate: clear one to avoid counting twice.</p>`;
+    if (A.kind === 'wall') h += `<div class="fxRow"><label class="sg"><span>Height ft</span><input id="amH" value="${esc(fmtFtIn(m.height > 0 ? m.height : (+A.h || 9)))}" style="width:72px"></label><label class="sg"><span>Corner bead LF</span><input id="amBead" value="${P.bead ?? ''}" placeholder="auto" style="width:64px"></label></div>
+      <div class="oplist"><b class="small">Openings</b>${openingsOf(m).map(o => `<div class="fxRow oprow" data-oid="${o.id}"><select data-of="ot"><option value="door" ${o.ot !== 'window' ? 'selected' : ''}>Door</option><option value="window" ${o.ot === 'window' ? 'selected' : ''}>Window</option></select><input data-of="ow" value="${esc(fmtFtIn(+o.ow))}" style="width:64px" title="Width"><span class="small">×</span><input data-of="oh" value="${esc(fmtFtIn(+o.oh))}" style="width:64px" title="Height"><span class="small muted">${fmtN(o.ow * o.oh)} SF</span><button class="small" data-oflip title="Flip the door swing">⇅</button><button class="small danger" data-odel title="Delete">✕</button></div>`).join('') || '<div class="muted small">None yet.</div>'}
+      <div class="fxRow"><button class="small" id="amAddOp">+ Add opening</button><span class="muted small">Adds ${UI.open.t} ${fmtFtIn(UI.open.w)} × ${fmtFtIn(UI.open.h)} at the middle; drag it along the wall, or use the Opening tool.</span></div></div>`;
+    if (A.kind === 'soffit') h += `<div class="fxRow"><label class="sg"><span>Width ft</span><input id="amW" value="${esc(fmtFtIn(num(P.w ?? A.w, 2)))}" style="width:64px"></label><label class="sg"><span>Drop ft</span><input id="amD" value="${esc(fmtFtIn(num(P.d ?? A.d, 1.5)))}" style="width:64px"></label><label class="sg"><span>Sides</span><input id="amS" inputmode="decimal" value="${num(P.sides ?? A.sides, 1)}" style="width:44px"></label><label class="sg"><span>Bead LF</span><input id="amBead" value="${P.bead ?? ''}" placeholder="auto" style="width:64px"></label></div>`;
+    if (A.kind === 'ceiling') h += `<div class="fxRow"><label class="sg"><span>Corner bead LF</span><input id="amBead" value="${P.bead ?? ''}" placeholder="0" style="width:64px"></label></div>`;
+  }
+  h += `</div><div class="dcol grow">${A ? breakdownHTML(m, A) : `<p class="muted small">Pick ${m.wall ? 'a wall type' : 'an assembly'} to see the material and labor breakdown for this ${m.wall ? 'wall' : 'markup'}.</p>`}</div></div>`;
+  body.innerHTML = h;
+  const re = () => { touch(); renderOverlay(); refreshPanel(); renderDock(true); };
+  body.querySelector('#amLib').onclick = () => { S.asmView = 'lib'; S.asmEdit = A?.id || S.asmEdit; renderDock(true); };
+  body.querySelector('#amSel').onchange = e => { pushUndo(); const a = asmById(e.target.value); if (a) { m.asm = a.id; if (m.wall && a.wall) m.wall = { ...a.wall }; if (m.wall && !(m.height > 0)) m.height = +a.h || 9; } else delete m.asm; re(); };
+  const fe = (id, f) => { const el = body.querySelector(id); if (el) el.onchange = () => f(el.value); };
+  fe('#amH', v => { const x = parseFtIn(v); if (!(x > 0)) return toast('Height like 9 or 8\'6"'); pushUndo(); m.height = +x.toFixed(4); re(); });
+  fe('#amBead', v => { pushUndo(); m.asmP = { ...(m.asmP || {}) }; if (String(v).trim() === '') delete m.asmP.bead; else m.asmP.bead = num(v); re(); });
+  fe('#amW', v => { const x = parseFtIn(v); if (!(x > 0)) return toast('Width like 2\''); pushUndo(); m.asmP = { ...(m.asmP || {}), w: x }; re(); });
+  fe('#amD', v => { const x = parseFtIn(v); if (!(x >= 0)) return toast('Drop like 1\'6"'); pushUndo(); m.asmP = { ...(m.asmP || {}), d: x }; re(); });
+  fe('#amS', v => { pushUndo(); m.asmP = { ...(m.asmP || {}), sides: Math.max(0, num(v, 1)) }; re(); });
+  body.querySelectorAll('.oprow').forEach(r => {
+    const o = S.project.markups.find(x => x.id === r.dataset.oid); if (!o) return;
+    r.querySelectorAll('[data-of]').forEach(el => el.onchange = () => { const f = el.dataset.of; let v = el.value; if (f !== 'ot') { v = parseFtIn(v); if (!(v > 0)) return toast('Size like 3\' or 2\'8"'); } pushUndo(); o[f] = v; re(); });
+    r.querySelector('[data-odel]').onclick = () => { pushUndo(); S.project.markups = S.project.markups.filter(x => x.id !== o.id); re(); };
+    r.querySelector('[data-oflip]').onclick = () => { pushUndo(); o.flip = !o.flip; re(); };
+  });
+  const ao = body.querySelector('#amAddOp'); if (ao) ao.onclick = () => { const L = polyLen(m.pts); let acc = 0, at = m.pts[0]; for (let i = 1; i < m.pts.length; i++) { const d = dist(m.pts[i - 1], m.pts[i]); if (acc + d >= L / 2) { const t = (L / 2 - acc) / (d || 1); at = [m.pts[i - 1][0] + (m.pts[i][0] - m.pts[i - 1][0]) * t, m.pts[i - 1][1] + (m.pts[i][1] - m.pts[i - 1][1]) * t]; break; } acc += d; } const sel = m.id; placeOpening(at, m); S.selId = sel; renderOverlay(); refreshPanel(); renderDock(true); };
+}
+function asmLibPanel(body, selM) {
+  const A = asmById(S.asmEdit) || S.asms[0]; if (!A) { body.innerHTML = '<p class="muted small">No assemblies.</p>'; return; } S.asmEdit = A.id;
+  const groups = Object.keys(ASM_KINDS).map(k => `<optgroup label="${ASM_KINDS[k]}">${asmOpts([k], A.id)}</optgroup>`).join('');
+  const useK = { wall: ['wallAsm', 'wall', 'wall'], ceiling: ['ceilAsm', 'ceiling', 'ceiling'], soffit: ['soffitAsm', 'soffit', 'soffit'] }[A.kind];
+  const inp = (k, label, v, w = 60, tip = '') => `<label class="sg"><span>${label}</span><input data-af="${k}" value="${esc(String(v ?? ''))}" style="width:${w}px" title="${tip}"></label>`;
+  const sample = { LF: 1, H: 1, W: 1, D: 1, SIDES: 1, AREA: 1, PERIM: 1, OPEN: 1, OPENW: 1, NOPEN: 1, NDOOR: 1, NWIN: 1, NET: 1, BOARD: 1, CORNERS: 1, OUTC: 1, BEADLF: 1, OC: 16 };
+  const rows = A.comps.map((c, i) => `<tr data-ci="${i}"><td><input type="checkbox" data-cf="on" ${c.on !== false ? 'checked' : ''}></td><td><input data-cf="name" value="${esc(c.name)}" style="width:180px"></td><td><input data-cf="unit" value="${esc(c.unit)}" style="width:52px"></td><td><input data-cf="f" class="fxin${isFinite(asmCompQty(c, sample)) ? '' : ' bad'}" value="${esc(c.f)}" style="width:210px"></td><td><input data-cf="price" inputmode="decimal" value="${c.price}" style="width:64px"></td><td><input data-cf="labor" inputmode="decimal" value="${c.labor}" style="width:56px"></td><td><input data-cf="waste" inputmode="decimal" value="${c.waste}" style="width:44px"></td><td><input type="checkbox" data-cf="round" ${c.round ? 'checked' : ''}></td><td><button class="small danger" data-cdel title="Remove">✕</button></td></tr>`).join('');
+  body.innerHTML = `<div class="dhead"><b>Assemblies</b><select id="alSel">${groups}</select>${selM ? '<button class="small" id="alBack">← Selected markup</button>' : ''}<button class="small" id="alDup">Duplicate</button>${A.builtin ? '<button class="small" id="alReset" title="Put this template back to the example values">Reset to example</button>' : '<button class="small danger" id="alDel">Delete</button>'}<button class="small accent" id="alUse">Use for next ${useK[2]}</button></div>
+    <p class="small warnnote">${esc(ASM_NOTE)}. The quantities are rules of thumb to start from, not a code-checked design.</p>
+    <div class="fxRow asmMeta">${inp('name', 'Name', A.name, 300)}<span class="badge">${ASM_KINDS[A.kind]}</span>${A.kind !== 'ceiling' ? inp('sides', A.kind === 'soffit' ? 'Drops boarded' : 'Sides boarded', A.sides, 44) : ''}${inp('oc', 'OC in', A.oc, 44, 'Stud / framing spacing in inches')}${A.kind === 'wall' ? inp('h', 'Default height ft', A.h, 52) + inp('core', 'Core in', A.wall?.core, 52) + inp('gwb', 'Board each side in', A.wall?.gwb, 52) : ''}${A.kind === 'soffit' ? inp('w', 'Width ft', A.w, 48) + inp('d', 'Drop ft', A.d, 48) : ''}
+      ${inp('lw', 'Line weight pt', A.style?.width ?? '', 48, 'Blank = default')}${inp('hs', 'Hatch scale ×', A.style?.hscale ?? '', 48, 'Blank = 1')}<label class="sg"><span>Hatch</span><select data-af="hatch">${Object.entries(HATCHES).concat(Object.entries(ARCH_PATS).map(([k, p]) => [k, p.n || k])).map(([k, n]) => `<option value="${k}" ${(A.style?.hatch || 'none') === k ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select></label></div>
+    <div class="tscroll"><table class="fxT asmEd"><thead><tr><th>On</th><th>Item</th><th>Unit</th><th>Qty formula ƒx</th><th>Price $</th><th>Labor $</th><th>Waste %</th><th title="Round the quantity with waste up to whole units">Whole</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="fxRow"><button class="small" id="alAddC">+ Component</button><span class="muted small">Variables: ${esc(ASM_VARS_HELP[A.kind])}. Functions: ceil, round, floor, min, max.</span></div>`;
+  const save = (rerender) => { saveAsms(); renderOverlay(); refreshPanel(); if (S.view === 'estimate') renderEstimate(); if (rerender) renderDock(true); };
+  body.querySelector('#alSel').onchange = e => { S.asmEdit = e.target.value; renderDock(true); };
+  const bk = body.querySelector('#alBack'); if (bk) bk.onclick = () => { S.asmView = 'mark'; renderDock(true); };
+  body.querySelector('#alDup').onclick = () => { const c = JSON.parse(JSON.stringify(A)); c.id = 'asm-' + uid(); c.builtin = false; c.name = A.name + ' (copy)'; S.asms.push(c); S.asmEdit = c.id; save(true); toast('Duplicated: edit the copy'); };
+  const rs = body.querySelector('#alReset'); if (rs) rs.onclick = () => { const d = ASM_DEFAULTS().find(x => x.id === A.id); if (d) { S.asms[S.asms.indexOf(A)] = d; save(true); toast('Reset to the example values'); } };
+  const dl = body.querySelector('#alDel'); if (dl) dl.onclick = () => { const n = (S.project?.markups || []).filter(m => m.asm === A.id).length; if (n && !body.querySelector('#alDel').dataset.armed) { body.querySelector('#alDel').dataset.armed = 1; body.querySelector('#alDel').textContent = `Delete (used by ${n})?`; return; } S.asms = S.asms.filter(x => x !== A); S.asmEdit = null; save(true); };
+  body.querySelector('#alUse').onclick = () => { UI[useK[0]] = A.id; saveUI(); S.asmView = 'mark'; S.selId = null; setTool(useK[1]); toast(`Next ${useK[2]}: ${A.name}`); };
+  body.querySelectorAll('[data-af]').forEach(el => el.onchange = () => {
+    const k = el.dataset.af, v = el.value; A.style = A.style || {};
+    if (k === 'name') A.name = v.trim() || A.name;
+    else if (k === 'hatch') A.style.hatch = v;
+    else if (k === 'lw' || k === 'hs') { const f = k === 'lw' ? 'width' : 'hscale'; if (v.trim() === '') delete A.style[f]; else A.style[f] = clamp(num(v, 1), k === 'lw' ? 0.25 : 0.1, k === 'lw' ? 12 : 10); }
+    else if (k === 'core' || k === 'gwb') { const x = parseInches(v); if (!(x >= 0)) return toast('Inches like 3.5 or 5/8'); A.wall = { ...(A.wall || {}), preset: 'custom', [k]: x }; for (const m of S.project?.markups || []) if (m.asm === A.id && m.wall) m.wall = { ...A.wall }; touch(); }
+    else if (k === 'h' || k === 'w' || k === 'd') { const x = parseFtIn(v); if (!(x >= 0)) return toast('Feet like 9 or 8\'6"'); A[k] = x; }
+    else A[k] = num(v, A[k]);
+    save(k === 'name');
+  });
+  body.querySelectorAll('tr[data-ci]').forEach(r => {
+    const c = A.comps[+r.dataset.ci];
+    r.querySelectorAll('[data-cf]').forEach(el => el.onchange = () => { const f = el.dataset.cf; c[f] = el.type === 'checkbox' ? el.checked : ['price', 'labor', 'waste'].includes(f) ? num(el.value) : el.value; if (f === 'f') el.classList.toggle('bad', !isFinite(asmCompQty(c, sample))); save(false); });
+    r.querySelector('[data-cdel]').onclick = () => { A.comps.splice(+r.dataset.ci, 1); save(true); };
+  });
+  body.querySelector('#alAddC').onclick = () => { A.comps.push(C('c' + uid().slice(0, 6), 'New item', 'EA', 'LF', 0, 0, 0, true)); save(true); };
+}
+/* ---- Draw tab: snap / grid rows and the assembly pickers for the wall, opening, ceiling and soffit tools ---- */
+function snapRowsHTML() {
+  const tg = (k, label, on, tip) => `<label class="chk small" title="${tip}"><input type="checkbox" data-dopt="${k}" ${on ? 'checked' : ''}> ${label}</label>`;
+  const ft = v => esc(fmtFtIn(v).replace(/-0"$/, ''));
+  const types = [['end', 'Endpoint'], ['mid', 'Midpoint'], ['int', 'Intersection'], ['perp', 'Perpendicular'], ['near', 'On line'], ['align', 'Alignment guides'], ['par', 'Parallel'], ['perpg', 'Perpendicular guide']];
+  return `<div class="fxRow snaprow">${tg('snap', '<b>Snap</b> (S)', UI.snap !== false, 'Master snap switch: object snaps and guides (S)')}${tg('ortho', 'Ortho (O)', UI.ortho, 'Lock to horizontal / vertical (O, or hold Shift)')}${tg('s:grid', 'Snap to grid', UI.gsnap, 'Points land on the grid')}</div>
+    <div class="fxRow snaptypes${UI.snap === false ? ' off' : ''}">${types.map(([k, n]) => tg('s:' + k, n, UI.snaps[k] !== false, SNAP_NAMES[k] + ' snap')).join('')}</div>
+    <div class="fxRow">${tg('grid', 'Grid (G)', UI.grid, 'Show the grid')}<span class="small">minor</span><input id="dwGrid" style="width:58px" value="${ft(UI.gridFt || 1)}" title="Minor grid spacing, feet-inches (real feet when the page has a scale)"><span class="small">major</span><input id="dwGridM" style="width:58px" value="${ft(UI.gridMajorFt || 5)}" title="Major grid spacing, feet-inches"><label class="chk small" title="Print the grid on the drawing"><input type="checkbox" id="dwPrGrid" ${UI.prGrid ? 'checked' : ''}> Print grid</label></div>`;
+}
+function asmDrawHTML(t) {
+  if (t === 'wall') return `<div class="fxRow asmpick"><label class="sg"><span>Wall type</span><select id="dwAsm"><option value="">— None (product only) —</option>${asmOpts(['wall'], UI.wallAsm)}</select></label><button type="button" class="small" data-asmlib="wall">Edit wall types</button></div>${asmById(UI.wallAsm) ? `<p class="muted small">New walls use <b>${esc(asmById(UI.wallAsm).name)}</b>: thickness, hatch and the material / labor breakdown come from the wall type.</p>` : ''}`;
+  if (t === 'ceiling' || t === 'soffit') { const key = t === 'ceiling' ? 'ceilAsm' : 'soffitAsm'; return `<div class="fxRow asmpick"><label class="sg"><span>${t === 'ceiling' ? 'Ceiling assembly' : 'Soffit assembly'}</span><select id="dwAsmK" data-k="${key}">${asmOpts([t], UI[key])}</select></label><button type="button" class="small" data-asmlib="${t}">Edit</button></div><p class="muted small">${esc(HINTS[t])}</p>`; }
+  if (t === 'opening') { const o = UI.open; return `<div class="fxRow asmpick"><label class="sg"><span>Opening</span><select id="dwOT"><option value="door" ${o.t !== 'window' ? 'selected' : ''}>Door</option><option value="window" ${o.t === 'window' ? 'selected' : ''}>Window</option></select></label><label class="sg"><span>Width</span><input id="dwOW" value="${esc(fmtFtIn(o.w))}" style="width:64px"></label><label class="sg"><span>Height</span><input id="dwOH" value="${esc(fmtFtIn(o.h))}" style="width:64px"></label></div><p class="muted small">${esc(HINTS.opening)} Wall types add king/jack studs and a header for each one.</p>`; }
+  return '';
+}
+function bindAsmDraw(body) {
+  const ws = body.querySelector('#dwAsm'); if (ws) ws.onchange = () => { UI.wallAsm = ws.value; saveUI(); renderPreview(); renderDock(true); };
+  const ks = body.querySelector('#dwAsmK'); if (ks) ks.onchange = () => { UI[ks.dataset.k] = ks.value; saveUI(); };
+  body.querySelectorAll('[data-asmlib]').forEach(b => b.onclick = () => { const k = b.dataset.asmlib; S.asmEdit = k === 'wall' ? (UI.wallAsm || 'asm-2x4') : UI[k === 'ceiling' ? 'ceilAsm' : 'soffitAsm']; S.asmView = 'lib'; S.selId = null; S.sel.clear(); setDockTab('asm'); });
+  const ot = body.querySelector('#dwOT'), ow = body.querySelector('#dwOW'), oh = body.querySelector('#dwOH');
+  if (ot) { ot.onchange = () => { UI.open.t = ot.value; if (ot.value === 'window' && UI.open.h === 7) { UI.open.h = 4; oh.value = fmtFtIn(4); } saveUI(); };
+    const sz = (el, f) => el.onchange = () => { const v = parseFtIn(el.value); if (v > 0) { UI.open[f] = +v.toFixed(4); saveUI(); } else toast('Size like 3\' or 2\'8"'); }; sz(ow, 'w'); sz(oh, 'h'); }
+  const gm = body.querySelector('#dwGridM'); if (gm) gm.onchange = () => { const v = parseFtIn(gm.value); if (v > 0) { UI.gridMajorFt = v; saveUI(); renderOverlay(); } else toast('Major grid like 5\''); };
+  const pg = body.querySelector('#dwPrGrid'); if (pg) pg.onchange = () => { UI.prGrid = pg.checked; saveUI(); };
+}
+const asmToolStyle = A => A ? { ...(A.style || {}) } : null;
+
 /* ======================= v1.6: style controls (Bluebeam/OST conventions: color, line width, line style, fill, hatch, opacity) ======================= */
 const hex6 = c => /^#[0-9a-f]{6}$/i.test(c || '') ? c : '#000000';
 const STYLE_FIELDS = {
   length: ['color', 'width', 'dash', 'opacity', 'show'],
-  area: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'hatch', 'opacity', 'show'],
+  area: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'hatch', 'hscale', 'opacity', 'show'],
   count: ['color', 'opacity', 'show'],
   highlight: ['color', 'width', 'opacity'],
-  pen: ['color', 'width', 'dash', 'opacity'], line: ['color', 'width', 'dash', 'opacity'], arrow: ['color', 'width', 'dash', 'opacity'],
+  pen: ['color', 'width', 'dash', 'opacity'], line: ['color', 'width', 'dash', 'opacity'], arrow: ['color', 'width', 'head', 'dash', 'opacity'],
   rect: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'opacity'], ellipse: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'opacity'], cloud: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'opacity'],
-  text: ['color', 'fs', 'bold', 'bg', 'border', 'opacity'],
-  callout: ['color', 'width', 'fs', 'bold', 'bg', 'opacity'],
-  dline: ['color', 'width', 'dash', 'opacity'], drect: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'hatch', 'opacity'], dim: ['color', 'width', 'fs', 'opacity'],
-  wall: ['color', 'width', 'hatch', 'opacity', 'show'],
+  text: ['color', 'fs', 'bold', 'pad', 'bg', 'border', 'opacity'],
+  callout: ['color', 'tcolor', 'width', 'head', 'fs', 'bold', 'pad', 'bg', 'opacity'],
+  opening: ['color', 'width'],
+  dline: ['color', 'width', 'dash', 'opacity'], drect: ['color', 'width', 'dash', 'fill', 'fillOpacity', 'hatch', 'hscale', 'opacity'], dim: ['color', 'width', 'fs', 'opacity'],
+  wall: ['color', 'width', 'hatch', 'hscale', 'opacity', 'show'],
 };
 const fieldsFor = m => STYLE_FIELDS[isQty(m) ? (m.wall ? 'wall' : m.type) : m.kind] || [];
 function hatchIcon(k) {
@@ -1954,14 +2441,18 @@ function styleHTML(st, F, kind) {
   const rng = (k, label, min, max, step, v, unit = '') => `<label class="sg"><span>${label} <output>${fmtStyle(k, v)}${unit}</output></span><input type="range" data-k="${k}" min="${min}" max="${max}" step="${step}" value="${v}"></label>`;
   let h = '<div class="stl">';
   if (F.includes('color')) h += `<div class="sg wide"><span>Color</span><div class="sws">${SWATCHES.map(c => `<button type="button" class="swb${String(st.color).toLowerCase() === c ? ' on' : ''}" data-k="color" data-v="${c}" style="background:${c}" title="${c}" aria-label="Color ${c}"></button>`).join('')}<input type="color" data-k="color" value="${hex6(st.color)}" title="Custom color"></div></div>`;
-  if (F.includes('width')) h += rng('width', 'Line width', 0.5, kind === 'highlight' ? 48 : 16, 0.5, +st.width || 2, ' pt');
+  if (F.includes('width')) h += rng('width', kind === 'callout' ? 'Leader width' : kind === 'wall' ? 'Line weight' : 'Line width', kind === 'wall' ? 0.25 : 0.5, kind === 'highlight' ? 48 : kind === 'wall' ? 12 : 16, kind === 'wall' ? 0.25 : 0.5, +st.width || (kind === 'wall' ? 1 : 2), ' pt');
+  if (F.includes('head')) h += rng('head', 'Arrow head size', 0.3, 4, 0.1, +st.head || 1, '×');
+  if (F.includes('tcolor')) h += `<label class="sg"><span>Text color</span><input type="color" data-k="tcolor" value="${hex6(st.tcolor || st.color)}" title="Text color"></label>`;
   if (F.includes('dash')) h += `<label class="sg"><span>Line style</span><select data-k="dash">${Object.entries(DASHES).map(([k, n]) => `<option value="${k}" ${st.dash === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`;
   if (F.includes('fill')) h += `<label class="sg"><span>Fill</span><select data-k="fill"><option value="none" ${st.fill === 'none' ? 'selected' : ''}>No fill</option><option value="solid" ${st.fill !== 'none' ? 'selected' : ''}>Color fill</option></select></label>`;
   if (F.includes('fillOpacity')) h += rng('fillOpacity', 'Fill opacity', 0.05, 1, 0.05, st.fillOpacity ?? 0.2);
+  if (F.includes('hscale')) h += rng('hscale', 'Hatch scale', 0.2, 5, 0.1, +st.hscale || 1, '×');
   if (F.includes('hatch')) h += `<div class="sg wide"><span>Pattern (hatch) <output>${esc(HATCHES[st.hatch || 'none'] || 'None')}</output></span>${HATCH_GROUPS.map(([g, ks]) => `<div class="hts"><i class="htg">${g}</i>${ks.map(k => `<button type="button" class="htb${(st.hatch || 'none') === k ? ' on' : ''}" data-k="hatch" data-v="${k}" title="${HATCHES[k]}" aria-label="Hatch ${HATCHES[k]}">${hatchIcon(k)}</button>`).join('')}</div>`).join('')}</div>`;
-  if (F.includes('fs')) h += rng('fs', 'Font size', 4, 120, 1, +st.fs || 16, ' pt');
+  if (F.includes('fs')) h += `<div class="sg fsrow"><span>Font size <output>${fmtStyle('fs', +st.fs || 16)} pt</output></span><div class="fsin"><input type="range" data-k="fs" min="4" max="200" step="1" value="${Math.min(200, +st.fs || 16)}"><input type="number" data-k="fs" min="2" max="800" step="1" value="${+st.fs || 16}" style="width:64px" title="Font size, pt"></div></div>`;
+  if (F.includes('pad')) h += rng('pad', 'Padding', 0, 2, 0.05, st.pad != null && st.pad !== '' ? +st.pad : 0.35, '× size');
   if (F.includes('bold')) h += `<label class="sg chk"><input type="checkbox" data-k="bold" ${st.bold ? 'checked' : ''}> Bold</label>`;
-  if (F.includes('bg')) h += `<label class="sg"><span>Background</span><select data-k="bg">${[['none', 'None'], ['#ffffff', 'White'], ['#fff7b0', 'Yellow'], ['#e8f1ff', 'Light blue']].map(([v, n]) => `<option value="${v}" ${st.bg === v ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`;
+  if (F.includes('bg')) { const BG = [['none', 'None'], ['#ffffff', 'White'], ['#fff7b0', 'Yellow'], ['#e8f1ff', 'Light blue']], cust = st.bg && !BG.some(([v]) => v === st.bg); h += `<label class="sg"><span>Background</span><span class="bgrow"><select data-k="bg">${BG.map(([v, n]) => `<option value="${v}" ${(st.bg || 'none') === v ? 'selected' : ''}>${n}</option>`).join('')}${cust ? `<option value="${esc(st.bg)}" selected>Custom</option>` : ''}</select><input type="color" data-k="bg" value="${hex6(st.bg && st.bg !== 'none' ? st.bg : '#ffffff')}" title="Custom background color"></span></label>`; }
   if (F.includes('border')) h += `<label class="sg chk"><input type="checkbox" data-k="border" ${st.border ? 'checked' : ''}> Border</label>`;
   if (F.includes('opacity')) h += rng('opacity', 'Opacity', 0.1, 1, 0.05, st.opacity ?? 1);
   if (F.includes('show')) h += `<div class="sg wide"><span>Show on drawing</span><label class="chk"><input type="checkbox" data-k="showLabel" ${st.showLabel !== false ? 'checked' : ''}> Label</label> <label class="chk"><input type="checkbox" data-k="showValue" ${st.showValue !== false ? 'checked' : ''}> Measurement</label></div>`;
@@ -1971,15 +2462,23 @@ const fmtStyle = (k, v) => /opacity/i.test(k) ? Math.round(v * 100) + '%' : Stri
 function bindStyle(root, set) {   // set(key, value, final)
   root.querySelectorAll('[data-k]').forEach(el => {
     const k = el.dataset.k;
-    const val = () => el.type === 'checkbox' ? el.checked : el.dataset.v ?? (el.type === 'range' ? parseFloat(el.value) : el.value);
+    const val = () => el.type === 'checkbox' ? el.checked : el.dataset.v ?? (el.type === 'range' || el.type === 'number' ? parseFloat(el.value) : el.value);
     if (el.tagName === 'BUTTON') { el.onclick = () => set(k, val(), true); return; }
-    el.oninput = () => { const o = el.parentElement.querySelector('output') || el.closest('.sg')?.querySelector('output'); if (o) o.textContent = fmtStyle(k, val()) + (k === 'width' || k === 'fs' ? ' pt' : ''); if (el.type === 'range' || el.type === 'color') set(k, val(), false); };
+    el.oninput = () => { const o = el.parentElement.querySelector('output') || el.closest('.sg')?.querySelector('output'); if (o) o.textContent = fmtStyle(k, val()) + (k === 'width' || k === 'fs' ? ' pt' : k === 'head' || k === 'hscale' ? '×' : k === 'pad' ? '× size' : ''); if (el.type === 'range' || el.type === 'color') set(k, val(), false); };
     el.onchange = () => set(k, val(), true);
   });
 }
 let styleUndo = false;
 function styleSetter(ms, scope) {   // scope 'product': change the product's look (all its markups, OST "condition" style); else these markups only
   return (k, v, final) => {
+    if (scope === 'asm') {
+      const as = [...new Set(ms.map(asmOf).filter(Boolean))];
+      if (!styleUndo) { pushUndo(); styleUndo = true; }
+      for (const a of as) { a.style = { ...(a.style || {}), [k]: v }; for (const m of S.project.markups) if (m.asm === a.id && m.style && k in m.style) { delete m.style[k]; if (!Object.keys(m.style).length) delete m.style; } }
+      renderOverlay();
+      if (final) { styleUndo = false; saveAsms(); touch(); refreshPanel(); renderDock(true); }
+      return;
+    }
     if (scope === 'product') {
       const prods = [...new Set(ms.map(m => prodById(m.productId)).filter(Boolean))];
       if (!styleUndo) { pushUndo(); styleUndo = true; }
@@ -1999,7 +2498,7 @@ function styleSetter(ms, scope) {   // scope 'product': change the product's loo
 }
 
 /* ======================= v1.6: bottom dock (properties, formula, product, scale, print) ======================= */
-S.dockTab = ['props', 'fx', 'prod', 'scale', 'print', 'draw'].includes(UI.dockTab) ? UI.dockTab : 'fx';
+S.dockTab = ['props', 'fx', 'prod', 'scale', 'print', 'draw', 'asm'].includes(UI.dockTab) ? UI.dockTab : 'fx';
 S.styleScope = 'markup'; S.fxScope = 'product';
 let dockKey = '', dockLive = () => { };
 function setDockTab(t) {
@@ -2021,12 +2520,12 @@ function dockTarget() {   // the product the Formula / Product tabs work on: the
 function renderDock(force) {
   const body = $('#dockBody'); if (!body) return;
   $$('#dockTabs button').forEach(b => b.classList.toggle('on', b.dataset.dt === S.dockTab));
-  const key = [S.dockTab, [...S.sel].join(','), S.activeProductId, S.tool, S.dockNew ? 'n' : '', S.calib ? 'c' : '', S.project?.id, S.docId, S.pageNum, S.styleScope, S.fxScope, S.dockTab === 'draw' ? (S.drawing?.pts.length ? 1 : 0) + ':' + (curScale()?.ftPerPt || '') : ''].join('|');
+  const key = [S.dockTab, [...S.sel].join(','), S.activeProductId, S.tool, S.dockNew ? 'n' : '', S.calib ? 'c' : '', S.project?.id, S.docId, S.pageNum, S.styleScope, S.fxScope, S.dockTab === 'draw' ? (S.drawing?.pts.length ? 1 : 0) + ':' + (curScale()?.ftPerPt || '') : '', S.dockTab === 'asm' ? (S.asmView || '') + ':' + (S.asmEdit || '') : ''].join('|');
   if (!force && key === dockKey && body.contains(document.activeElement)) { dockLive(); return; }
   dockKey = key; dockLive = () => { };
-  ({ props: dockProps, fx: dockFx, prod: dockProd, scale: dockScale, print: dockPrint, draw: dockDraw })[S.dockTab](body);
+  ({ props: dockProps, fx: dockFx, prod: dockProd, scale: dockScale, print: dockPrint, draw: dockDraw, asm: dockAsm })[S.dockTab](body);
   const ms = selMarks(), ctx = $('#dockCtx');
-  ctx.textContent = ms.length > 1 ? `${ms.length} selected` : ms.length ? `Selected: ${markName(ms[0])}${ms[0].label ? ' · ' + ms[0].label : ''}` : isAnnTool(S.tool) || isDraftTool(S.tool) ? `Tool: ${NOTE_NAMES[S.tool] || 'Wall'}` : prodById(S.activeProductId) ? `Next: ${prodById(S.activeProductId).name}` : '';
+  ctx.textContent = ms.length > 1 ? `${ms.length} selected` : ms.length ? `Selected: ${markName(ms[0])}${ms[0].label ? ' · ' + ms[0].label : ''}` : isAnnTool(S.tool) || isDraftTool(S.tool) || isAsmTool(S.tool) ? `Tool: ${NOTE_NAMES[S.tool] || ASM_TOOL_NAMES[S.tool] || 'Wall'}${S.tool === 'wall' && asmById(UI.wallAsm) ? ' · ' + asmById(UI.wallAsm).name : ''}` : prodById(S.activeProductId) ? `Next: ${prodById(S.activeProductId).name}` : '';
 }
 function dockProps(body) {
   if (!S.project || !S.page) { body.innerHTML = '<p class="muted small">Open a PDF to start. Select a markup to edit its label, text and look here.</p>'; return; }
@@ -2047,8 +2546,8 @@ function dockProps(body) {
     }
     body.innerHTML = '<p class="muted small">Select a markup on the plan to edit its label, text and look here. Pick a markup tool (highlighter, pen, cloud, text…) to set how it draws.</p>'; return;
   }
-  const m = ms[0], one = ms.length === 1, allQty = ms.every(isQty), hasProd = allQty && ms.some(x => prodById(x.productId));
-  const scope = hasProd ? S.styleScope : 'markup';
+  const m = ms[0], one = ms.length === 1, allQty = ms.every(isQty), hasProd = allQty && ms.some(x => prodById(x.productId)), hasAsm = allQty && ms.some(x => asmOf(x));
+  const scope = (S.styleScope === 'product' && hasProd) || (S.styleScope === 'asm' && hasAsm) ? S.styleScope : 'markup';
   const kinds = new Set(ms.map(x => isQty(x) ? x.type : x.kind));
   const F = kinds.size === 1 ? fieldsFor(m) : ['color', 'opacity'];
   const st = styleOf(m);
@@ -2057,7 +2556,7 @@ function dockProps(body) {
     const g = geo(m), p = prodById(m.productId), q = p ? qtyFor(m, p) : null;
     h += `<div class="big-val">${esc(valueText(m).split(' · ')[0])}</div>
       ${m.type === 'area' && !g.noscale ? `<div class="muted small">Perimeter ${fmtFtIn(g.lf)} (${fmtN(g.lf)} LF)</div>` : ''}
-      ${p && q != null ? `<div class="small">Counts as <b>${fmtQty(q, p.unit)} ${esc(p.unit)}</b> of ${esc(p.name)}</div>` : `<div class="small muted">${p ? '' : 'No product yet: pick one in the Product box at the top.'}</div>`}
+      ${p && q != null ? `<div class="small">Counts as <b>${fmtQty(q, p.unit)} ${esc(p.unit)}</b> of ${esc(p.name)}</div>` : asmOf(m) ? (() => { const B = asmBreakdown(m); return `<div class="small">${ASM_KINDS[asmOf(m).kind]}: <b>${esc(asmOf(m).name)}</b>${B ? ` · ${fmt$(B.total)} (material ${fmt$(B.mat)}, labor ${fmt$(B.labor)})` : ''} <button class="small" data-goto="asm">Breakdown</button></div>`; })() : `<div class="small muted">${p ? '' : 'No product yet: pick one in the Product tab below or the Product box at the top.'}</div>`}
       <label class="field"><span>Label</span><input id="sLabel" value="${esc(m.label)}" placeholder="e.g. Kitchen north wall"></label>
       ${m.wall ? wallPresetHTML(m.wall, 'pw') : ''}
       ${m.type === 'length' ? `<label class="field"><span>${m.wall ? 'Wall height ft (area = LF × height)' : 'Wall height ft (turns length into SF)'}</span><input id="sHeight" inputmode="decimal" value="${m.height || ''}" placeholder="e.g. 9"></label>` : ''}
@@ -2065,12 +2564,13 @@ function dockProps(body) {
   } else if (one) {
     h += `<div class="dhead"><b>${NOTE_NAMES[m.kind]}</b><span class="muted small">${DRAFT_KINDS[m.kind] ? 'Plan linework' : 'Drawing note'}: prints on the drawing, never counts in quantities.${m.kind === 'dim' ? ' Reads ' + esc(dimText(m)) + '.' : ''}</span></div>
       ${m.kind === 'text' || m.kind === 'callout' ? `<label class="field"><span>Text</span><textarea id="sText" rows="2">${esc(m.text)}</textarea></label>` : ''}
+      ${m.kind === 'opening' ? `<div class="fxRow"><select id="opT"><option value="door" ${m.ot !== 'window' ? 'selected' : ''}>Door</option><option value="window" ${m.ot === 'window' ? 'selected' : ''}>Window</option></select><label class="sg"><span>Width</span><input id="opW" value="${esc(fmtFtIn(+m.ow))}" style="width:64px"></label><label class="sg"><span>Height</span><input id="opH" value="${esc(fmtFtIn(+m.oh))}" style="width:64px"></label><button class="small" id="opF">⇅ Flip swing</button></div><div class="muted small">${fmtN(m.ow * m.oh)} SF off ${(() => { const w = S.project.markups.find(x => x.id === m.wallId); return w ? esc(markName(w)) : 'no wall (deleted)'; })()}. Drag it to slide along the wall.</div>` : ''}
       <label class="field"><span>Label (shows in the markup list)</span><input id="sLabel" value="${esc(m.label)}" placeholder="optional"></label>
       <div class="actions"><button class="small danger" id="sDel">Delete</button></div>`;
   } else {
     h += `<div class="dhead"><b>${ms.length} selected</b><span class="muted small">Style changes apply to all of them. Drag one to move them all.</span></div><div class="actions"><button class="small danger" id="sDel">Delete ${ms.length}</button></div>`;
   }
-  h += `</div><div class="dcol grow">${hasProd ? `<div class="seg" role="group" aria-label="Apply style to"><button type="button" data-scope="markup" class="${scope === 'markup' ? 'on' : ''}">This markup</button><button type="button" data-scope="product" class="${scope === 'product' ? 'on' : ''}">Whole product</button></div>` : ''}${styleHTML(st, F, m.kind || m.type)}</div></div>`;
+  h += `</div><div class="dcol grow">${hasProd || hasAsm ? `<div class="seg" role="group" aria-label="Apply style to"><button type="button" data-scope="markup" class="${scope === 'markup' ? 'on' : ''}">This markup</button>${hasProd ? `<button type="button" data-scope="product" class="${scope === 'product' ? 'on' : ''}">Whole product</button>` : ''}${hasAsm ? `<button type="button" data-scope="asm" class="${scope === 'asm' ? 'on' : ''}">Whole ${m.wall ? 'wall type' : 'assembly'}</button>` : ''}</div>` : ''}${styleHTML(st, F, m.kind || m.type)}</div></div>`;
   body.innerHTML = h;
   bindStyle(body.querySelector('.dcol.grow'), styleSetter(ms, scope));
   body.querySelectorAll('[data-scope]').forEach(b => b.onclick = () => { S.styleScope = b.dataset.scope; renderDock(true); });
@@ -2080,6 +2580,10 @@ function dockProps(body) {
   const hEl = body.querySelector('#sHeight'); if (hEl) hEl.onchange = () => { pushUndo(); const v = num(hEl.value, 0); m.height = v > 0 ? v : null; touch(); renderOverlay(); refreshPanel(); renderDock(true); };
   const tx = body.querySelector('#sText'); if (tx) { let u = false; tx.oninput = () => { if (!u) { pushUndo(); u = true; } m.text = tx.value; renderOverlay(); }; tx.onchange = () => { u = false; touch(); refreshPanel(); }; }
   const del = body.querySelector('#sDel'); if (del) del.onclick = () => one ? deleteMarkup(m.id) : deleteSelected();
+  if (m.kind === 'opening') { const re = () => { touch(); renderOverlay(); refreshPanel(); renderDock(true); };
+    body.querySelector('#opT').onchange = e => { pushUndo(); m.ot = e.target.value; re(); };
+    for (const [id, f] of [['#opW', 'ow'], ['#opH', 'oh']]) body.querySelector(id).onchange = e => { const v = parseFtIn(e.target.value); if (!(v > 0)) return toast('Size like 3\' or 2\'8"'); pushUndo(); m[f] = +v.toFixed(4); re(); };
+    body.querySelector('#opF').onclick = () => { pushUndo(); m.flip = !m.flip; re(); }; }
   const ac = body.querySelector('#sAddCount'); if (ac) ac.onclick = () => { setTool('count'); S.countId = m.id; S.selId = m.id; updateFinish(); renderOverlay(); toast('Tap to add more to this count'); };
 }
 function fxRows(p) {   // every markup of this product in the project, current page first
@@ -2195,10 +2699,17 @@ function dockProd(body) {
     };
     return;
   }
-  const { p } = dockTarget();
-  if (!p) { body.innerHTML = `<div class="dhead"><b>Product</b><span class="muted small">No product picked. Choose one in the Product box at the top, or add one here.</span><button class="small accent" id="npOpen">＋ New product</button></div>`; body.querySelector('#npOpen').onclick = openNewProduct; return; }
-  body.innerHTML = `<div class="dhead"><span class="sw" style="background:${p.color}"></span><b>${esc(p.name)}</b><span class="muted small">Edits save as you go and apply everywhere this product is used.</span><button class="small" id="npOpen">＋ New product</button></div>${productFormHTML(p)}`;
-  bindProductForm(body, p); body.querySelector('#npOpen').onclick = openNewProduct;
+  const { m, p } = dockTarget(), sq = selMarks().filter(isQty);
+  const pick = `<label class="sg dpPick"><span>${m ? (sq.length > 1 ? `Product for ${sq.length} selected` : 'Product for ' + esc(markName(m))) : 'Draw with'}</span><select id="dpPick">${productOptions(m ? m.productId : S.activeProductId, S.products.length ? '— No product —' : '— No products yet —')}<option value="__new">＋ Add new product…</option></select></label>`;
+  const dbl = m && m.productId && asmOf(m) ? `<p class="small warn">This ${m.wall ? 'wall' : 'markup'} also has the assembly “${esc(asmOf(m).name)}”. Both count in the estimate; clear one to avoid counting twice.</p>` : '';
+  const bindPick = () => body.querySelector('#dpPick').onchange = e => {
+    const v = e.target.value; if (v === '__new') { e.target.value = m ? m.productId || '' : S.activeProductId || ''; openNewProduct(); return; }
+    if (m) { pushUndo(); for (const x of sq) { x.productId = v || null; x.color = v ? null : x.asm ? asmColor(asmById(x.asm) || {}) : x.wall ? '#333333' : TYPE_COLOR[x.type]; } touch(); renderOverlay(); refreshPanel(); markThumb(); refreshActiveProduct(); renderDock(true); toast(`${sq.length} markup${sq.length > 1 ? 's' : ''} → ${prodById(v)?.name || 'no product'}`); return; }
+    S.activeProductId = v; S.countId = null; updateFinish(); refreshActiveProduct(); renderDock(true);
+  };
+  if (!p) { body.innerHTML = `<div class="dhead"><b>Product</b>${pick}<span class="muted small">${m ? 'No product on this ' + (m.wall ? 'wall' : 'markup') + ' yet: pick one here.' : 'No product picked. Pick one here or in the Product box at the top.'}</span><button class="small accent" id="npOpen">＋ New product</button></div>${dbl}`; bindPick(); body.querySelector('#npOpen').onclick = openNewProduct; return; }
+  body.innerHTML = `<div class="dhead"><span class="sw" style="background:${p.color}"></span><b>${esc(p.name)}</b>${pick}<span class="muted small">Edits save as you go and apply everywhere this product is used.</span><button class="small" id="npOpen">＋ New product</button></div>${dbl}${productFormHTML(p)}`;
+  bindPick(); bindProductForm(body, p); body.querySelector('#npOpen').onclick = openNewProduct;
 }
 function dockScale(body) {
   if (!S.page) { body.innerHTML = '<p class="muted small">Open a PDF first.</p>'; return; }
@@ -2227,9 +2738,10 @@ function dockPrint(body) {
   const n = S.project ? new Set(S.project.markups.map(m => m.docId + ':' + m.page)).size : 0;
   body.innerHTML = `<div class="dhead"><b>Print the marked-up drawing</b><span class="muted small">Prints (or saves as PDF) the sheet with every markup, highlight and note drawn on it. File name: <b>${esc(drawingTitle())}</b></span></div>
     <div class="fxRow"><label class="chk"><input type="radio" name="prW" value="page" ${UI.prAll ? '' : 'checked'}> This page</label><label class="chk"><input type="radio" name="prW" value="all" ${UI.prAll ? 'checked' : ''}> All marked pages (${n})</label>
-    <label class="chk"><input type="checkbox" id="prLeg" ${UI.prLegend === false ? '' : 'checked'}> Quantity legend</label><button class="accent" id="prGo">🖨 Print drawing</button></div>`;
+    <label class="chk"><input type="checkbox" id="prLeg" ${UI.prLegend === false ? '' : 'checked'}> Quantity legend</label><label class="chk"><input type="checkbox" id="prGrid" ${UI.prGrid ? 'checked' : ''}> Print grid</label><button class="accent" id="prGo">🖨 Print drawing</button></div>`;
   body.querySelectorAll('[name=prW]').forEach(r => r.onchange = () => { UI.prAll = r.value === 'all' && r.checked; saveUI(); });
   body.querySelector('#prLeg').onchange = e => { UI.prLegend = e.target.checked; saveUI(); };
+  body.querySelector('#prGrid').onchange = e => { UI.prGrid = e.target.checked; saveUI(); };
   body.querySelector('#prGo').onclick = () => printDrawing(!!UI.prAll);
 }
 
@@ -2270,7 +2782,7 @@ async function printDrawing(all = false) {
       const doc = S.project.docs.find(x => x.id === d), sc = S.project.scales[pageKey(d, pn)];
       const leg = UI.prLegend === false ? [] : pageAgg(ms);
       secs.push(`<section class="pdraw"><div class="pdHead"><b>${esc(S.project.name || 'Takeoff')}</b> · ${esc(doc?.name || '')} · page ${pn}${sc ? ' · scale ' + esc(sc.label) : ''} · ${new Date().toLocaleDateString()}</div>
-        <div class="pdBox"><img src="${url}" alt=""><svg class="mk" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${markupsSVG(ms, zP, () => false, `p${secs.length}-`)}</svg></div>
+        <div class="pdBox"><img src="${url}" alt=""><svg class="mk" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${UI.prGrid ? gridSVG(zP, W, H, sc?.ftPerPt, `g${secs.length}-`, true) : ''}${markupsSVG(ms, zP, () => false, `p${secs.length}-`)}</svg></div>
         ${leg.length ? `<div class="pdLeg">${leg.map(a => `<span>${a.hatch ? legendSwatch(a, `p${secs.length}-`) : `<i style="background:${a.color}"></i>`}${esc(a.name)}: <b>${fmtQty(a.q, a.unit)} ${esc(a.unit)}</b></span>`).join('')}</div>` : ''}</section>`);
     } catch (e) { console.warn(e); toast('Could not render page ' + pn); }
   }
