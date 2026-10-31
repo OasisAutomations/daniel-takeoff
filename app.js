@@ -3,7 +3,7 @@ import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.7.0';
+const VER = 'v1.7.1';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -234,10 +234,16 @@ function snapTargets() {   // endpoints and midpoints of everything on this page
   for (const q of S.drawing?.pts || []) out.push(q);
   return out;
 }
+// v1.7.1: snap reach is a finger/cursor radius on screen, but never more than 2'-0" of real length (or 2% of the sheet
+// unscaled), so zoomed-out phone views don't grab far-away points; and never less than 8 screen px so it still works.
+function snapTol() {
+  const px = (COARSE ? 16 : 11) / S.z, k = curScale()?.ftPerPt, cap = k ? 2 / k : 0.02 * Math.max(S.W || 0, S.H || 0, 400);
+  return Math.max(8 / S.z, Math.min(px, cap));
+}
 function snapPoint(q, shift) {
   S.snapHit = null;
   if (UI.osnap !== false) {
-    const tol = (COARSE ? 18 : 11) / S.z; let best = null, bd = tol;
+    const tol = snapTol(); let best = null, bd = tol;
     for (const t of snapTargets()) { const d = dist(t, q); if (d < bd) { bd = d; best = t; } }
     if (best) { S.snapHit = best; return best.slice(); }
   }
@@ -302,7 +308,7 @@ function finishDraft() {
   S.drawing = null; S.hover = null; S.snapHit = null;
   if (t === 'wall') {
     pushUndo();
-    const m = { id: uid(), type: 'length', docId: S.docId, page: S.pageNum, pts: d.pts.map(p => [rr2(p[0]), rr2(p[1])]), productId: S.activeProductId || null, label: '', height: null, color: S.activeProductId ? null : '#333333', wall: wallTool(), created: Date.now() };
+    const m = { id: uid(), type: 'length', docId: S.docId, page: S.pageNum, pts: d.pts.map(p => [rr2(p[0]), rr2(p[1])]), productId: S.activeProductId || null, label: '', height: UI.wallArea ? (UI.wallH > 0 ? UI.wallH : 9) : null, color: S.activeProductId ? null : '#333333', wall: wallTool(), created: Date.now() };
     const st = wallToolStyle(); if (Object.keys(st).length) m.style = st;
     S.project.markups.push(m); S.selId = m.id; touch(); updateFinish(); renderOverlay(); refreshPanel(); markThumb(); return m;
   }
@@ -332,7 +338,22 @@ function typedRect(wStr, hStr) {
 function toggleDraftOpt(k) { UI[k] = k === 'osnap' ? UI.osnap === false : !UI[k]; saveUI(); renderOverlay(); renderDock(true); toast(`${{ grid: 'Grid', gsnap: 'Snap to grid', ortho: 'Ortho', osnap: 'Snap to points' }[k]} ${(k === 'osnap' ? UI.osnap !== false : UI[k]) ? 'on' : 'off'}`, 1200); }
 
 /* ======================= v1.7: blank pages (a real one-page PDF built in the browser) ======================= */
-const BLANK_SIZES = { letter: { n: 'Letter 8.5x11', tag: '8.5x11', w: 612, h: 792 }, tabloid: { n: 'Tabloid 11x17', tag: '11x17', w: 792, h: 1224 }, archd: { n: 'Arch D 24x36', tag: '24x36', w: 1728, h: 2592 } };
+// v1.7.1: full grouped sheet list. Sizes are portrait (w < h) in PDF points; keys of v1.7.0 (letter, tabloid, archd) are kept.
+const inS = (n, tag, wi, hi, g) => ({ n, tag, w: wi * 72, h: hi * 72, g }), mmS = (n, wmm, hmm) => ({ n: `${n} (${wmm}x${hmm} mm)`, tag: n, w: +(wmm / 25.4 * 72).toFixed(2), h: +(hmm / 25.4 * 72).toFixed(2), g: 'ISO' });
+const BLANK_SIZES = {
+  letter: inS('Letter 8.5x11', '8.5x11', 8.5, 11, 'ANSI'), legal: inS('Legal 8.5x14', '8.5x14', 8.5, 14, 'ANSI'), tabloid: inS('Tabloid / ANSI B 11x17', '11x17', 11, 17, 'ANSI'),
+  ansic: inS('ANSI C 17x22', '17x22', 17, 22, 'ANSI'), ansid: inS('ANSI D 22x34', '22x34', 22, 34, 'ANSI'), ansie: inS('ANSI E 34x44', '34x44', 34, 44, 'ANSI'),
+  archa: inS('Arch A 9x12', '9x12', 9, 12, 'Architectural'), archb: inS('Arch B 12x18', '12x18', 12, 18, 'Architectural'), archc: inS('Arch C 18x24', '18x24', 18, 24, 'Architectural'),
+  archd: inS('Arch D 24x36', '24x36', 24, 36, 'Architectural'), arche1: inS('Arch E1 30x42', '30x42', 30, 42, 'Architectural'), arche: inS('Arch E 36x48', '36x48', 36, 48, 'Architectural'),
+  a4: mmS('A4', 210, 297), a3: mmS('A3', 297, 420), a2: mmS('A2', 420, 594), a1: mmS('A1', 594, 841), a0: mmS('A0', 841, 1189),
+  custom: { n: 'Custom W x H inches', tag: 'custom', g: 'Custom' },
+};
+const fmtIn = v => String(+(+v).toFixed(3));
+function sheetDims(o) {   // → { w, h, tag } in PDF points for the chosen size + orientation (custom: W x H inches, max 200")
+  let B = BLANK_SIZES[o.size] || BLANK_SIZES.tabloid;
+  if (o.size === 'custom') { const cw = clamp(+o.cw || 0, 1, 200), ch = clamp(+o.ch || 0, 1, 200); B = { tag: `${fmtIn(Math.min(cw, ch))}x${fmtIn(Math.max(cw, ch))}`, w: Math.min(cw, ch) * 72, h: Math.max(cw, ch) * 72 }; }
+  const land = o.orient !== 'port'; return { w: land ? B.h : B.w, h: land ? B.w : B.h, tag: B.tag, land };
+}
 const BLANK_SCALES = ['1/8"', '1/4"', '1/2"', '1"', '3"'];
 function blankPdf(w, h) {
   const objs = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
@@ -343,27 +364,83 @@ function blankPdf(w, h) {
   s += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n` + off.map(o => String(o).padStart(10, '0') + ' 00000 n \n').join('') + `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${x}\n%%EOF\n`;
   return new TextEncoder().encode(s);
 }
-const blankOpts = () => ({ size: 'tabloid', orient: 'land', scale: '1/4"', ...(UI.blank || {}) });
+const blankOpts = () => ({ size: 'tabloid', orient: 'land', scale: '1/4"', cw: 24, ch: 18, ...(UI.blank || {}) });
 async function addBlankPage(o = blankOpts()) {
-  const B = BLANK_SIZES[o.size] || BLANK_SIZES.tabloid, land = o.orient !== 'port', w = land ? B.h : B.w, h = land ? B.w : B.h;
-  const n = (S.project?.docs || []).filter(d => d.blank).length + 1, name = `Blank page ${n} (${B.tag})`;
+  if (o.size === 'custom' && !(+o.cw > 0 && +o.ch > 0)) { toast('Type the custom sheet width and height in inches'); return null; }
+  const { w, h, tag, land } = sheetDims(o);
+  const n = (S.project?.docs || []).filter(d => d.blank).length + 1, name = `Blank page ${n} (${tag})`;
   const sc = SCALES.find(s => s.group === 'Architectural' && s.label === `${o.scale} = 1'-0"`);
   const f = new File([blankPdf(w, h)], name + '.pdf', { type: 'application/pdf' });
-  const id = await addPdfFiles([f], { docName: name, projectName: 'Blank plan', blank: { size: o.size, orient: land ? 'land' : 'port' }, scale: sc ? { ftPerPt: sc.ftPerPt, label: sc.label } : null, toast: `${name} added${sc ? ' · scale ' + sc.label : ''}` });
+  const id = await addPdfFiles([f], { docName: name, projectName: 'Blank plan', blank: { size: o.size, orient: land ? 'land' : 'port', ...(o.size === 'custom' ? { cw: +o.cw, ch: +o.ch } : {}) }, scale: sc ? { ftPerPt: sc.ftPerPt, label: sc.label } : null, toast: `${name} added${sc ? ' · scale ' + sc.label : ''}` });
   if (id) { updateScaleLabel(); renderOverlay(); refreshPanel(); }
   return id;
 }
+function sizeSelectHTML(id, o) {
+  const groups = [...new Set(Object.values(BLANK_SIZES).map(v => v.g))];
+  return `<select id="${id}" title="Sheet size">${groups.map(g => `<optgroup label="${g}">${Object.entries(BLANK_SIZES).filter(([, v]) => v.g === g).map(([k, v]) => `<option value="${k}" ${o.size === k ? 'selected' : ''}>${v.n}</option>`).join('')}</optgroup>`).join('')}</select>`;
+}
+const sizeBits = (pre, o) => `${sizeSelectHTML(pre + 'Size', o)}<span class="cwh${o.size === 'custom' ? '' : ' hidden'}" id="${pre}Cwh"><input id="${pre}Cw" inputmode="decimal" value="${esc(fmtIn(o.cw || 24))}" title="Custom width, inches" style="width:54px"><span class="small">×</span><input id="${pre}Ch" inputmode="decimal" value="${esc(fmtIn(o.ch || 18))}" title="Custom height, inches" style="width:54px"><span class="small">in</span></span>
+    <select id="${pre}Or" title="Orientation"><option value="land" ${o.orient !== 'port' ? 'selected' : ''}>Landscape</option><option value="port" ${o.orient === 'port' ? 'selected' : ''}>Portrait</option></select>`;
+function readSizeBits(root, pre) {
+  const q = s => root.querySelector('#' + pre + s), o = { size: q('Size').value, orient: q('Or').value };
+  if (o.size === 'custom') { o.cw = parseInches(q('Cw').value); o.ch = parseInches(q('Ch').value); }
+  return o;
+}
+function bindSizeBits(root, pre, on) {
+  const q = s => root.querySelector('#' + pre + s);
+  q('Size').addEventListener('change', () => q('Cwh').classList.toggle('hidden', q('Size').value !== 'custom'));
+  ['Size', 'Or', 'Cw', 'Ch'].forEach(k => q(k).addEventListener('change', on));
+}
 function blankFormHTML(pre) {
   const o = blankOpts();
-  return `<div class="fxRow blankf"><select id="${pre}Size" title="Sheet size">${Object.entries(BLANK_SIZES).map(([k, v]) => `<option value="${k}" ${o.size === k ? 'selected' : ''}>${v.n}</option>`).join('')}</select>
-    <select id="${pre}Or" title="Orientation"><option value="land" ${o.orient !== 'port' ? 'selected' : ''}>Landscape</option><option value="port" ${o.orient === 'port' ? 'selected' : ''}>Portrait</option></select>
+  return `<div class="fxRow blankf">${sizeBits(pre, o)}
     <select id="${pre}Sc" title="Sheet scale (set automatically)">${BLANK_SCALES.map(s => `<option value='${s}' ${o.scale === s ? 'selected' : ''}>${s} = 1'-0"</option>`).join('')}<option value="" ${o.scale === '' ? 'selected' : ''}>No scale</option></select>
     <button class="accent${pre === 'eb' ? ' big' : ' small'}" id="${pre}Go">Blank page…</button></div>`;
 }
 function bindBlankForm(root, pre) {
-  const g = () => ({ size: root.querySelector('#' + pre + 'Size').value, orient: root.querySelector('#' + pre + 'Or').value, scale: root.querySelector('#' + pre + 'Sc').value });
-  ['Size', 'Or', 'Sc'].forEach(k => root.querySelector('#' + pre + k).onchange = () => { UI.blank = g(); saveUI(); });
-  root.querySelector('#' + pre + 'Go').onclick = async () => { UI.blank = g(); saveUI(); await addBlankPage(g()); };
+  const g = () => { const o = { ...blankOpts(), ...readSizeBits(root, pre), scale: root.querySelector('#' + pre + 'Sc').value }; if (!(o.cw > 0)) o.cw = blankOpts().cw; if (!(o.ch > 0)) o.ch = blankOpts().ch; return o; };
+  bindSizeBits(root, pre, () => { UI.blank = g(); saveUI(); }); root.querySelector('#' + pre + 'Sc').onchange = () => { UI.blank = g(); saveUI(); };
+  root.querySelector('#' + pre + 'Go').onclick = async () => { const o = g(); UI.blank = o; saveUI(); await addBlankPage(o); };
+}
+// v1.7.1: change an existing blank page's sheet size. The page PDF is rebuilt; markups keep their place measured from the
+// sheet's top-left corner (same scale), so nothing moves on the drawing.
+async function resizeBlank(docId, o) {
+  const d = S.project?.docs.find(x => x.id === docId); if (!d?.blank) return;
+  if (o.size === 'custom' && !(o.cw > 0 && o.ch > 0)) return toast('Type the custom sheet width and height in inches');
+  const { w, h, tag, land } = sheetDims(o), buf = blankPdf(w, h).buffer;
+  const name = /\([^)]*\)\s*$/.test(d.name) ? d.name.replace(/\([^)]*\)\s*$/, `(${tag})`) : `${d.name} (${tag})`;
+  const pdf = await pdfjsLib.getDocument({ ...PDF_OPTS, data: new Uint8Array(buf.slice(0)) }).promise;
+  await DB.put('pdfs', { id: d.id, name, data: buf });
+  S.docs.get(d.id)?.destroy?.(); S.docs.set(d.id, pdf);
+  d.name = name; d.blank = { size: o.size, orient: land ? 'land' : 'port', ...(o.size === 'custom' ? { cw: o.cw, ch: o.ch } : {}) };
+  const off = S.project.markups.filter(m => m.docId === d.id && m.pts?.some(p => p[0] > w || p[1] > h)).length;
+  touch(); await flush(); refreshDocSelect(); await showPage(d.id, 1); renderThumbs();
+  toast(`Sheet is now ${tag}${land ? ' landscape' : ' portrait'}${off ? ` · ${off} markup${off > 1 ? 's' : ''} reach past the new edge` : ''}`, 3500);
+}
+function sheetFormHTML(d) {
+  const o = { cw: 24, ch: 18, ...d.blank };
+  return `<div class="dsec"><b class="small">This sheet</b> <span class="muted small">${esc(d.name)}</span><div class="fxRow blankf">${sizeBits('sz', o)}<button class="small" id="szGo">Change sheet size</button></div></div>`;
+}
+function bindSheetForm(root, d) {
+  if (!root.querySelector('#szGo')) return; bindSizeBits(root, 'sz', () => { });
+  root.querySelector('#szGo').onclick = () => resizeBlank(d.id, readSizeBits(root, 'sz'));
+}
+const curDoc = () => S.project?.docs.find(d => d.id === S.docId) || null;
+// v1.7.1: pattern key: a grid of hatched plan rectangles with labels, at real size on scaled sheets. One undo step.
+function insertPatternKey() {
+  if (!S.page) return; const k = curScale()?.ftPerPt, sw = k ? 2 / k : 36, gap = sw * 1.3, fs = clamp(sw * 0.19, 4, 40), cols = 6, x0 = 36, y0 = 36;
+  pushUndo(); const add = (kind, pts, extra) => { const m = { id: uid(), type: 'note', kind, docId: S.docId, page: S.pageNum, pts: pts.map(p => [rr2(p[0]), rr2(p[1])]), text: '', label: '', created: Date.now(), ...extra }; S.project.markups.push(m); return m; };
+  let y = y0; const ids = [];
+  for (const [title, keys] of HATCH_GROUPS.slice(1)) {
+    ids.push(add('text', [[x0, y]], { text: title + (k ? ` (2'-0" squares, ${curScale().label})` : ''), style: { ...ANN_DEF.text, color: '#111111', fs: fs * 1.25, bg: 'none', border: false } }).id); y += fs * 2.4;
+    keys.forEach((h, i) => {
+      const cx = x0 + (i % cols) * (sw + gap), cy = y + Math.floor(i / cols) * (sw + fs * 3.2);
+      ids.push(add('drect', [[cx, cy], [cx + sw, cy + sw]], { style: { ...ANN_DEF.drect, width: 1, hatch: h } }).id);
+      ids.push(add('text', [[cx, cy + sw + fs * 0.3]], { text: HATCHES[h], style: { ...ANN_DEF.text, color: '#111111', fs, bold: false, bg: 'none', border: false } }).id);
+    });
+    y += Math.ceil(keys.length / cols) * (sw + fs * 3.2) + fs;
+  }
+  S.sel = new Set(ids); S._pri = ids[0]; touch(); renderOverlay(); refreshPanel(); markThumb(); toast('Pattern key added · move it with the selection, or ↶ to undo', 3000);
 }
 function mountEmptyBlank() { const el = $('#emptyBlank'); if (!el) return; el.innerHTML = blankFormHTML('eb'); bindBlankForm(el, 'eb'); }
 
@@ -379,16 +456,22 @@ function dockDraw(body) {
   else if (['dline', 'wall', 'length', 'area'].includes(t)) typed = `<form id="dwSeg" class="fxRow"><span class="small">Length</span><input id="dwL" placeholder="10'6&quot;" style="width:86px" autocomplete="off"><span class="small">Angle°</span><input id="dwA" inputmode="decimal" placeholder="0" style="width:56px" autocomplete="off">
     ${[['0', '→'], ['90', '↑'], ['180', '←'], ['270', '↓']].map(([a, s]) => `<button type="button" class="small" data-ang="${a}" title="${a}°">${s}</button>`).join('')}<button class="small accent">Add segment</button><button type="button" class="small" id="dwFin" ${d?.pts.length > 1 ? '' : 'disabled'}>✓ Finish</button>
     <span class="muted small">${d?.pts.length ? '0° = right, 90° = up. Blank angle keeps the last direction.' : 'Tap the start point on the plan first.'}</span></form>`;
-  const sty = isDraftTool(t) ? (t === 'wall' ? `${wallPresetHTML(wallTool(), 'dw')}${styleHTML({ ...QTY_DEF, hatch: 'stud', width: 1, color: prodById(S.activeProductId)?.color || '#333333', ...(prodById(S.activeProductId)?.style || {}), ...wallToolStyle() }, ['hatch'], 'wall')}<p class="muted small">Walls count as length (centerline LF) for the product picked in the toolbar; add a wall height in Properties to get SF.</p>`
+  const sty = isDraftTool(t) ? (t === 'wall' ? `${wallPresetHTML(wallTool(), 'dw')}${styleHTML({ ...QTY_DEF, hatch: 'stud', width: 1, color: prodById(S.activeProductId)?.color || '#333333', ...(prodById(S.activeProductId)?.style || {}), ...wallToolStyle() }, ['hatch'], 'wall')}<div class="fxRow"><label class="chk small" title="New walls take their area: centerline LF × height"><input type="checkbox" id="dwWA" ${UI.wallArea ? 'checked' : ''}> Wall area = LF × height</label><input id="dwWH" inputmode="decimal" value="${esc(String(UI.wallH || 9))}" style="width:52px" title="Wall height, feet"><span class="small">ft high</span></div>
+    <p class="muted small">Walls count centerline LF for the product picked in the toolbar. With wall area on (or a height set in Properties) they count SF instead, unless the product's unit is LF.</p>`
     : styleHTML(annToolStyle(t), STYLE_FIELDS[t], t)) : '';
   body.innerHTML = `<div class="dgrid"><div class="dcol">
     <div class="dhead"><b>Draw</b><span class="muted small">Plan linework: lines, rectangles and dimensions print on the drawing but never count. ${k ? 'Scale ' + esc(k.label) + '.' : '<b>Set a scale</b> to type exact lengths.'}</span></div>
     <div class="fxRow">${tools.map(([v, n]) => `<button type="button" class="small${t === v ? ' accent' : ''}" data-dtool="${v}">${n}</button>`).join('')}</div>
     ${typed}
     <div class="fxRow">${tg('grid', 'Grid', UI.grid, 'Show a grid (G)')}<input id="dwGrid" style="width:58px" value="${esc(fmtFtIn(UI.gridFt || 1).replace(/-0"$/, ''))}" title="Grid spacing (real feet when the page has a scale)">${tg('gsnap', 'Snap to grid', UI.gsnap, 'Points land on the grid')}${tg('osnap', 'Snap to ends / midpoints', UI.osnap !== false, 'Points jump to nearby endpoints and midpoints')}${tg('ortho', 'Ortho', UI.ortho, 'Lock to horizontal / vertical (O, or hold Shift)')}</div>
+    <div class="fxRow"><button type="button" class="small" id="dwKey" title="Drop a labelled key of every material hatch and surface texture on this sheet (plan linework, never counted)">Insert pattern key</button></div>
+    ${curDoc()?.blank ? sheetFormHTML(curDoc()) : ''}
     ${blank}
   </div><div class="dcol grow">${sty}</div></div>`;
-  bindBlankForm(body, 'bp');
+  bindBlankForm(body, 'bp'); if (curDoc()?.blank) bindSheetForm(body, curDoc());
+  body.querySelector('#dwKey').onclick = insertPatternKey;
+  const wa = body.querySelector('#dwWA'), wh = body.querySelector('#dwWH');
+  if (wa) { wa.onchange = () => { UI.wallArea = wa.checked; saveUI(); }; wh.onchange = () => { const v = parseFtIn(wh.value); if (v > 0) { UI.wallH = +v.toFixed(4); saveUI(); } else toast('Wall height like 9 or 8\'6"'); }; }
   body.querySelectorAll('[data-dtool]').forEach(b => b.onclick = () => setTool(b.dataset.dtool));
   body.querySelectorAll('[data-dopt]').forEach(c => c.onchange = () => toggleDraftOpt(c.dataset.dopt));
   const gi = body.querySelector('#dwGrid'); gi.onchange = () => { const v = parseFtIn(gi.value); if (v > 0) { UI.gridFt = v; saveUI(); renderOverlay(); } else toast('Grid spacing like 1\' or 6"'); };
@@ -709,25 +792,26 @@ function hatchDef(id, kind, color, z) {   // SVG pattern; spacing stays the same
   return `<pattern id="${id}" patternUnits="userSpaceOnUse" width="${s}" height="${s}"${rot ? ` patternTransform="rotate(${rot})"` : ''}>${body}</pattern>`;
 }
 function pillText(m, st) { return [st.showLabel !== false && m.label ? m.label : '', st.showValue !== false ? valueText(m) : ''].filter(Boolean).join(' · '); }
-function qtySVG(m, z, sel, defs, pre) {
+function qtySVG(m, z, sel, defs, pre, labs) {
   const st = styleOf(m), c = st.color, w = clamp(+st.width || QTY_DEF.width, 0.5, 30), sw = sel ? w + 1.4 : w, P = pp(m.pts), lab = pillText(m, st);
   const da = dashAttr(st.dash, sw), NS = 'vector-effect="non-scaling-stroke"'; let h = '';
-  if (m.type === 'length' && m.wall) h = wallSVG(m, st, z, sel, defs, pre, lab);
+  if (m.type === 'length' && m.wall) h = wallSVG(m, st, z, sel, defs, pre, labs ? '' : lab);
   else if (m.type === 'length') {
     if (sel) h += `<polyline points="${P}" fill="none" stroke="#fff" stroke-width="${sw + 3}" ${NS} stroke-linejoin="round" opacity=".8"/>`;
     h += `<polyline points="${P}" fill="none" stroke="${c}" stroke-width="${sw}" ${NS} stroke-linejoin="round" stroke-linecap="round"${da}/>`;
-    if (lab) { const e = m.pts[m.pts.length - 1]; h += pill(e[0] + 8 / z, e[1] - 10 / z, lab, c, 'start', z); }
+    if (lab && !labs) { const e = m.pts[m.pts.length - 1]; h += pill(e[0] + 8 / z, e[1] - 10 / z, lab, c, 'start', z); }
   } else if (m.type === 'area') {
     if (st.fill !== 'none') h += `<polygon points="${P}" fill="${c}" fill-opacity="${st.fillOpacity}" stroke="none"/>`;
     if (st.hatch && st.hatch !== 'none' && HATCHES[st.hatch]) h += `<polygon points="${P}" fill="url(#${patId(defs, pre, st.hatch, c, z, kOf(m))})" stroke="none"/>`;
     if (sel) h += `<polygon points="${P}" fill="none" stroke="#fff" stroke-width="${sw + 3}" ${NS} stroke-linejoin="round"/>`;
     h += `<polygon points="${P}" fill="none" stroke="${c}" stroke-width="${sw}" ${NS} stroke-linejoin="round"${da}/>`;
-    if (lab) { const [cx, cy] = centroid(m.pts); h += pill(cx, cy, lab, c, 'middle', z); }
+    if (lab && !labs) { const [cx, cy] = centroid(m.pts); h += pill(cx, cy, lab, c, 'middle', z); }
   } else {
     const nd = String(m.pts.length).length, r = ((nd >= 3 ? 15 : nd === 2 ? 13 : 12) + (sel ? 2 : 0)) / z, nfs = (nd >= 3 ? 14 : 16) / z;
     m.pts.forEach((p, i) => { h += `<circle cx="${p[0]}" cy="${p[1]}" r="${r}" fill="${c}" stroke="${sel ? '#ffd23f' : '#fff'}" stroke-width="${(sel ? 3 : 2) / z}"/><text class="cnum" x="${p[0]}" y="${p[1] + 0.5 / z}" font-size="${nfs}" stroke-width="${3.4 / z}" text-anchor="middle" dominant-baseline="central">${i + 1}</text>`; });
-    if (m.pts.length && lab) { const p = m.pts[m.pts.length - 1]; h += pill(p[0] + (r + 4 / z), p[1] - (r + 4 / z), lab, c, 'start', z); }
+    if (m.pts.length && lab && !labs) { const p = m.pts[m.pts.length - 1]; h += pill(p[0] + (r + 4 / z), p[1] - (r + 4 / z), lab, c, 'start', z); }
   }
+  if (lab && labs && m.pts.length) labs.push({ m, s: lab, c, op: st.opacity });
   return `<g${st.opacity < 1 ? ` opacity="${st.opacity}"` : ''}>${h}</g>`;
 }
 /* ---- annotation geometry (page units: they scale with the sheet, like Bluebeam markups, and print the same) ---- */
@@ -796,10 +880,66 @@ function annSVG(m, z, sel, defs, pre = 'h-') {
   if (sel) { const b = bboxOf(m), pd = 5 / z; o += `<rect x="${b.x0 - pd}" y="${b.y0 - pd}" width="${b.x1 - b.x0 + 2 * pd}" height="${b.y1 - b.y0 + 2 * pd}" fill="none" stroke="#ffd23f" stroke-width="${1.6 / z}" stroke-dasharray="${5 / z} ${3 / z}"/>`; }
   return o;
 }
+// v1.7.1 layers: plan (walls, plan lines/rects, dimensions) → takeoff → notes → value labels. Labels are placed where they
+// don't sit on plan linework or across a gap in it (door openings), nor on each other.
+const PLAN_KINDS = new Set(['dline', 'drect', 'dim']);
 function markupsSVG(ms, z, isSel, pre = 'h-') {
-  const defs = new Map(); let h = '';
-  for (const m of ms) h += isQty(m) ? qtySVG(m, z, isSel(m), defs, pre) : annSVG(m, z, isSel(m), defs, pre);
-  return (defs.size ? `<defs>${[...defs.values()].join('')}</defs>` : '') + h;
+  const defs = new Map(), labs = []; let plan = '', take = '', note = '';
+  for (const m of ms) {
+    if (isQty(m)) { const r = qtySVG(m, z, isSel(m), defs, pre, labs); if (m.wall) plan += r; else take += r; }
+    else if (PLAN_KINDS.has(m.kind)) plan += annSVG(m, z, isSel(m), defs, pre); else note += annSVG(m, z, isSel(m), defs, pre);
+  }
+  return (defs.size ? `<defs>${[...defs.values()].join('')}</defs>` : '') + plan + take + note + placeLabels(labs, ms, z);
+}
+function planObstacles(ms) {   // segments a label should not cover: plan linework, wall faces, dimension lines/text, and gaps
+  const segs = [], ends = [], add = (a, b) => segs.push([a, b]);
+  for (const m of ms) {
+    const p = m.pts || [];
+    if (m.wall) { const k = kOf(m), T = k ? wallTotalIn(m.wall) / 12 / k : 4; for (const d of [-T / 2, T / 2]) { const o = offsetLine(p, d, false); for (let i = 1; i < o.length; i++) add(o[i - 1], o[i]); } if (p.length > 1) ends.push(p[0], p[p.length - 1]); continue; }
+    if (isQty(m) || !PLAN_KINDS.has(m.kind)) continue;
+    if (m.kind === 'drect') { const b = box2(p), C = [[b.x0, b.y0], [b.x1, b.y0], [b.x1, b.y1], [b.x0, b.y1]]; C.forEach((c, i) => add(c, C[(i + 1) % 4])); continue; }
+    if (m.kind === 'dim') { const G = dimGeo(m); if (!G) continue; add(G.a2, G.b2); const fs = +styleOf(m).fs || 9, sg = Math.sign(G.o) || 1, mx = (G.a2[0] + G.b2[0]) / 2 + G.n[0] * sg * fs * 0.62, my = (G.a2[1] + G.b2[1]) / 2 + G.n[1] * sg * fs * 0.62, hw = dimText(m).length * fs * 0.32; add([mx - hw, my], [mx + hw, my]); add([mx, my - fs * 0.6], [mx, my + fs * 0.6]); continue; }
+    for (let i = 1; i < p.length; i++) add(p[i - 1], p[i]);
+    if (p.length > 1 && dist(p[0], p[p.length - 1]) > 1e-6) ends.push(p[0], p[p.length - 1]);
+  }
+  // a gap (door/window opening) = an open end and the nearest other open end within ~6' (or 108 pt unscaled)
+  const k = S.project && ms[0] ? kOf(ms[0]) : null, reach = k ? 6 / k : 108;
+  ends.forEach((a, i) => { let best = null, bd = reach; ends.forEach((b, j) => { if (i !== j) { const d = dist(a, b); if (d > 1e-6 && d < bd) { bd = d; best = b; } } }); if (best) add(a, best); });
+  return segs;
+}
+function segHitsBox(a, b, x0, y0, x1, y1) {   // Liang-Barsky clip test
+  let t0 = 0, t1 = 1; const dx = b[0] - a[0], dy = b[1] - a[1];
+  for (const [p, q] of [[-dx, a[0] - x0], [dx, x1 - a[0]], [-dy, a[1] - y0], [dy, y1 - a[1]]]) {
+    if (Math.abs(p) < 1e-12) { if (q < 0) return false; continue; }
+    const r = q / p; if (p < 0) { if (r > t1) return false; if (r > t0) t0 = r; } else { if (r < t0) return false; if (r < t1) t1 = r; }
+  }
+  return true;
+}
+function placeLabels(labs, ms, z) {
+  if (!labs.length) return '';
+  const obs = planObstacles(ms), placed = [], fs = 15 / z, hh = fs * 1.5, pad = 3 / z; let out = '';
+  for (const L of labs) {
+    const m = L.m, w = L.s.length * 0.62 * fs + 14 / z, cands = [];
+    if (m.type === 'area') { const [cx, cy] = centroid(m.pts), B = box2(m.pts); cands.push([cx, cy]); for (const dy of [-1.4, 1.4, -2.8, 2.8]) if (cy + dy * hh > B.y0 + hh && cy + dy * hh < B.y1 - hh) cands.push([cx, cy + dy * hh]); }   // stay inside the area
+    else if (m.type === 'count') { const p = m.pts[m.pts.length - 1], r = 16 / z; cands.push([p[0] + r + w / 2, p[1] - r], [p[0] - r - w / 2, p[1] - r], [p[0] + r + w / 2, p[1] + r], [p[0] - r - w / 2, p[1] + r]); }
+    else {
+      const P = m.pts, closed = P.length > 3 && dist(P[0], P[P.length - 1]) < 1e-6, c0 = centroid(P), half = m.wall ? wallThkPt(m) / 2 : 0;
+      const segs = []; for (let i = 1; i < P.length; i++) segs.push([P[i - 1], P[i]]); segs.sort((a, b) => dist(b[0], b[1]) - dist(a[0], a[1]));
+      for (const [a, b] of segs) {
+        const len = dist(a, b) || 1, n = [-(b[1] - a[1]) / len, (b[0] - a[0]) / len];
+        for (const t of [0.5, 0.25, 0.75]) {
+          const q = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+          const sides = closed && ((q[0] + n[0] - c0[0]) ** 2 + (q[1] + n[1] - c0[1]) ** 2 < (q[0] - c0[0]) ** 2 + (q[1] - c0[1]) ** 2) ? [-1, 1] : [1, -1];   // outside first
+          for (const sd of sides) { const off = half + Math.abs(n[0]) * w / 2 + Math.abs(n[1]) * hh / 2 + 6 / z; cands.push([q[0] + n[0] * off * sd, q[1] + n[1] * off * sd]); }
+        }
+      }
+      const e = P[P.length - 1]; cands.push([e[0] + 8 / z + w / 2, e[1] - 10 / z]);
+    }
+    const free = ([x, y]) => { const x0 = x - w / 2 - pad, y0 = y - hh / 2 - pad, x1 = x + w / 2 + pad, y1 = y + hh / 2 + pad; return !obs.some(([a, b]) => segHitsBox(a, b, x0, y0, x1, y1)) && !placed.some(B => x0 < B[2] && x1 > B[0] && y0 < B[3] && y1 > B[1]); };
+    const at = cands.find(free) || cands[0]; placed.push([at[0] - w / 2, at[1] - hh / 2, at[0] + w / 2, at[1] + hh / 2]);
+    out += `<g${L.op < 1 ? ` opacity="${L.op}"` : ''}>${pill(at[0], at[1], L.s, L.c, 'middle', z)}</g>`;
+  }
+  return out;
 }
 function handlesOf(m) {   // vertex handles (i) for lines/areas/arrows/callouts; corner resize handles for boxes, freehand and text
   if (isQty(m)) return m.type === 'count' ? [] : m.pts.map((p, i) => ({ x: p[0], y: p[1], i }));
@@ -1920,7 +2060,7 @@ function dockProps(body) {
       ${p && q != null ? `<div class="small">Counts as <b>${fmtQty(q, p.unit)} ${esc(p.unit)}</b> of ${esc(p.name)}</div>` : `<div class="small muted">${p ? '' : 'No product yet: pick one in the Product box at the top.'}</div>`}
       <label class="field"><span>Label</span><input id="sLabel" value="${esc(m.label)}" placeholder="e.g. Kitchen north wall"></label>
       ${m.wall ? wallPresetHTML(m.wall, 'pw') : ''}
-      ${m.type === 'length' ? `<label class="field"><span>Wall height ft (turns length into SF)</span><input id="sHeight" inputmode="decimal" value="${m.height || ''}" placeholder="e.g. 9"></label>` : ''}
+      ${m.type === 'length' ? `<label class="field"><span>${m.wall ? 'Wall height ft (area = LF × height)' : 'Wall height ft (turns length into SF)'}</span><input id="sHeight" inputmode="decimal" value="${m.height || ''}" placeholder="e.g. 9"></label>` : ''}
       <div class="actions">${m.type === 'count' ? '<button class="small" id="sAddCount">+ Add to this count</button>' : ''}<button class="small" data-goto="fx">ƒx Formula</button><button class="small danger" id="sDel">Delete</button></div>`;
   } else if (one) {
     h += `<div class="dhead"><b>${NOTE_NAMES[m.kind]}</b><span class="muted small">${DRAFT_KINDS[m.kind] ? 'Plan linework' : 'Drawing note'}: prints on the drawing, never counts in quantities.${m.kind === 'dim' ? ' Reads ' + esc(dimText(m)) + '.' : ''}</span></div>
