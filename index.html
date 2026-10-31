@@ -135,12 +135,12 @@
         <div class="panelBar"><span>Pages</span><button class="pbtn newproj" id="btnNewProj" title="Start a new project">+ New project</button><button class="pbtn" data-min="side" title="Minimize this panel">⟨</button></div>
         <div id="newProjHost"></div>
         <div class="sideHead">
-          <select id="docSelect" title="PDF in this project"></select>
+          <select id="docSelect" title="PDF in this project" hidden></select><span class="addLbl">Add pages</span>
           <button id="btnAddPdf" class="accent small" title="Add PDF">+ PDF</button>
           <button id="btnAddBlank" class="small" title="Add a blank page to draw on (size, orientation and scale in the Draw panel below)">+ Blank</button>
         </div>
         <div id="thumbs"></div>
-        <div id="docTools" class="small">
+        <div id="docTools" class="small" hidden>
           <button id="btnRemovePdf" class="small danger" title="Remove this PDF from the project">Remove PDF</button>
         </div>
       </aside>

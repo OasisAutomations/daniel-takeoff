@@ -3,7 +3,7 @@ import * as pdfjsLib from './vendor/pdf.min.mjs';
 import { propose as voicePropose, resolveQty as voiceResolve } from './voice.js';
 import { evaluate as fxEval, SAMPLE_VARS as FX_SAMPLE, PRESETS as FX_PRESETS, HELP_HTML as FX_HELP } from './formula.js';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './vendor/pdf.worker.min.mjs';
-const VER = 'v1.8.3';
+const VER = 'v1.8.4';
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -383,7 +383,7 @@ async function resizeBlank(docId, o) {
   const name = /\([^)]*\)\s*$/.test(d.name) ? d.name.replace(/\([^)]*\)\s*$/, `(${tag})`) : `${d.name} (${tag})`;
   const pdf = await pdfjsLib.getDocument({ ...PDF_OPTS, data: new Uint8Array(buf.slice(0)) }).promise;
   await DB.put('pdfs', { id: d.id, name, data: buf });
-  S.docs.get(d.id)?.destroy?.(); S.docs.set(d.id, pdf);
+  S.docs.get(d.id)?.destroy?.(); S.docs.set(d.id, pdf); thumbDrop(d.id);
   d.name = name; d.blank = { size: o.size, orient: land ? 'land' : 'port', ...(o.size === 'custom' ? { cw: o.cw, ch: o.ch } : {}) };
   const off = S.project.markups.filter(m => m.docId === d.id && m.pts?.some(p => p[0] > w || p[1] > h)).length;
   touch(); await flush(); refreshDocSelect(); await showPage(d.id, 1); renderThumbs();
@@ -499,7 +499,7 @@ const safeName = s => String(s || 'project').replace(/[^\w\- ]+/g, '').trim().re
 
 /* ---------- saving ---------- */
 let saveT;
-function touch() { if (!S.project) return; S.project.updated = Date.now(); setSave('Saving…'); clearTimeout(saveT); saveT = setTimeout(flush, 300); }
+function touch() { if (!S.project) return; S.project.updated = Date.now(); if (S.docId) thumbDirty(S.docId + ':' + S.pageNum); setSave('Saving…'); clearTimeout(saveT); saveT = setTimeout(flush, 300); }
 async function flush() { clearTimeout(saveT); if (!S.project) return; try { await DB.put('projects', S.project); setSave('Saved'); } catch (e) { setSave('Save failed'); console.warn(e); } }
 document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
 window.addEventListener('pagehide', () => flush());
@@ -617,16 +617,18 @@ async function addPdfFiles(files, opt = {}) {
   if (first) { refreshDocSelect(); await showPage(first, 1); renderThumbs(); toast(opt.toast || 'PDF added'); }
   return first;
 }
-async function removeCurrentPdf() {
-  const P = S.project, d = P?.docs.find(x => x.id === S.docId); if (!d) return;
+async function removeCurrentPdf() { return removeDoc(S.docId); }
+async function removeDoc(id) {
+  const P = S.project, d = P?.docs.find(x => x.id === id); if (!d) return;
   const n = P.markups.filter(m => m.docId === d.id).length;
-  if (!await askConfirm('Remove PDF?', `Remove <b>${esc(d.name)}</b> from this project${n ? ` along with its ${n} markups` : ''}?`, 'Remove')) return;
+  if (!await askConfirm(d.blank ? 'Remove blank page?' : 'Remove PDF?', `Remove <b>${esc(d.name)}</b> from this project${n ? ` along with its ${n} markups` : ''}?`, 'Remove')) return;
   P.markups = P.markups.filter(m => m.docId !== d.id); P.docs = P.docs.filter(x => x.id !== d.id);
   for (const k of Object.keys(P.scales)) if (k.startsWith(d.id + ':')) delete P.scales[k];
   if (P.pageNames) delete P.pageNames[d.id];
   S.docs.get(d.id)?.destroy?.(); S.docs.delete(d.id); await DB.del('pdfs', d.id); S.undo = []; S.redo = [];
   await flush(); refreshDocSelect();
-  if (P.docs[0]) await showPage(P.docs[0].id, 1); else clearViewer();
+  thumbDrop(d.id);
+  if (S.docId === d.id || !S.docId) { if (P.docs[0]) await showPage(P.docs[0].id, 1); else clearViewer(); }
   renderThumbs(); refreshAll();
 }
 
@@ -1043,7 +1045,7 @@ function constrain(p, shift) {
 }
 const snap = () => JSON.stringify({ markups: S.project.markups, scales: S.project.scales });
 function pushUndo() { if (!S.project) return; S.undo.push(snap()); if (S.undo.length > 150) S.undo.shift(); S.redo = []; }
-function restoreSnap(s) { const o = JSON.parse(s); S.project.markups = o.markups; S.project.scales = o.scales; S.selId = null; S.countId = null; touch(); renderOverlay(); refreshPanel(); updateScaleLabel(); markThumb(); }
+function restoreSnap(s) { const o = JSON.parse(s); S.project.markups = o.markups; S.project.scales = o.scales; S.selId = null; S.countId = null; touch(); thumbDirty(); renderOverlay(); refreshPanel(); updateScaleLabel(); markThumb(); }
 function undo() {
   if (S.drawing?.pts.length) { S.drawing.pts.pop(); updateFinish(); renderPreview(); return; }
   if (!S.undo.length) return toast('Nothing to undo'); S.redo.push(snap()); restoreSnap(S.undo.pop());
@@ -1243,7 +1245,10 @@ document.addEventListener('keydown', e => {
   else if (k === 'pagedown') gotoPage(1); else if (k === 'pageup') gotoPage(-1);
 });
 document.addEventListener('keyup', e => { if (e.key === ' ') spaceDown = false; });
-function gotoPage(d) { const doc = S.project?.docs.find(x => x.id === S.docId); if (!doc) return; const n = clamp(S.pageNum + d, 1, doc.pages); if (n !== S.pageNum) showPage(S.docId, n); }
+function gotoPage(dl) {   // v1.8.4: steps through every page of every document, in panel order
+  const L = allPages(), i = L.findIndex(([d, p]) => d === S.docId && p === S.pageNum); if (i < 0) return;
+  const j = clamp(i + dl, 0, L.length - 1); if (j !== i) showPage(L[j][0], L[j][1]);
+}
 
 /* ======================= SCALE ======================= */
 function updateScaleLabel() {
@@ -1263,38 +1268,79 @@ function refreshDocSelect() {
   if (S.docId) sel.value = S.docId;
   $('#btnRemovePdf').disabled = !S.docId;
 }
-let thumbObs = null;
+/* v1.8.4: the Pages panel is one continuous list of every page of every document, grouped by document.
+   Each thumbnail is the rendered page (cached as a small JPEG per doc:page) plus a live SVG of its markups. */
+const thumbImg = new Map();   // 'doc:page' -> { url, w, h }
+let thumbObs = null, thumbQ = Promise.resolve(), thumbProj = null, thumbT = 0; const thumbDirtyK = new Set();
+const allPages = () => (S.project?.docs || []).flatMap(d => Array.from({ length: d.pages }, (_, i) => [d.id, i + 1]));
+function thumbDrop(docId) { for (const [k, v] of thumbImg) if (!docId || k.startsWith(docId + ':')) { URL.revokeObjectURL(v.url); thumbImg.delete(k); } }
+function thumbSVG(b) {
+  const d = b.dataset.doc, p = +b.dataset.page, im = thumbImg.get(d + ':' + p), sv = b.querySelector('svg.tmk'); if (!im || !sv || !S.project) return;
+  const ms = S.project.markups.filter(m => m.docId === d && m.page === p);
+  try { sv.innerHTML = markupsSVG(ms, 1.6 * 720 / Math.max(im.w, im.h), () => false, `t${b.dataset.i}-`); } catch (e) { console.warn(e); }
+  b.dataset.n = ms.length;
+}
+function paintThumb(b, im) {
+  const box = b.querySelector('.tim'); box.style.aspectRatio = `${im.w} / ${im.h}`;
+  box.innerHTML = `<img src="${im.url}" alt="" draggable="false"><svg class="mk tmk" viewBox="0 0 ${im.w} ${im.h}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg"></svg>`;
+  b.dataset.r = '1'; thumbSVG(b);
+}
+function thumbRender(b) {   // one page at a time so a 100-page set never stalls the UI
+  const d = b.dataset.doc, p = +b.dataset.page, k = d + ':' + p;
+  thumbQ = thumbQ.then(async () => {
+    if (!b.isConnected) return;
+    let im = thumbImg.get(k);
+    if (!im) {
+      const pdf = await getPdf(d), pg = await pdf.getPage(p), v1 = pg.getViewport({ scale: 1 });
+      const vp = pg.getViewport({ scale: Math.min(3, 640 / Math.max(v1.width, v1.height)) }), c = document.createElement('canvas');
+      c.width = Math.floor(vp.width); c.height = Math.floor(vp.height); const ctx = c.getContext('2d', { alpha: false }); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      await pg.render({ canvasContext: ctx, viewport: vp }).promise;
+      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.85)); c.width = c.height = 1;
+      if (thumbImg.has(k)) im = thumbImg.get(k); else { im = { url: URL.createObjectURL(blob), w: v1.width, h: v1.height }; thumbImg.set(k, im); }
+    }
+    if (b.isConnected) paintThumb(b, im);
+  }).catch(e => { if (e?.name !== 'RenderingCancelledException') console.warn(e); });
+}
+function thumbDirty(k) {   // markups changed: refresh those thumbnails' overlays ~500 ms later
+  thumbDirtyK.add(k || '*'); clearTimeout(thumbT);
+  thumbT = setTimeout(() => { const all = thumbDirtyK.has('*'); $$('#thumbs .thumb[data-r]').forEach(b => { if (all || thumbDirtyK.has(b.dataset.doc + ':' + b.dataset.page)) thumbSVG(b); }); thumbDirtyK.clear(); }, 500);
+}
+function phoneSideDone() { if (matchMedia('(max-width:560px)').matches && !UI.sideMin) { UI.sideMin = true; saveUI(); applyUI(); } }   // on a phone the panel is a page picker: close it once a page is chosen
 function renderThumbs() {
   const box = $('#thumbs'); box.innerHTML = ''; thumbObs?.disconnect();
-  const doc = S.project?.docs.find(d => d.id === S.docId); if (!doc) return;
-  const docId = doc.id;
-  thumbObs = new IntersectionObserver(ents => ents.forEach(async en => {
-    if (!en.isIntersecting) return; const b = en.target; thumbObs.unobserve(b);
-    try {
-      const pdf = await getPdf(docId), pg = await pdf.getPage(+b.dataset.page), v1 = pg.getViewport({ scale: 1 });
-      const sc = 260 / Math.max(v1.width, v1.height), vp = pg.getViewport({ scale: sc }), c = document.createElement('canvas');
-      c.width = Math.floor(vp.width); c.height = Math.floor(vp.height); await pg.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-      c.style.width = Math.round(vp.width / 2) + 'px'; b.prepend(c);
-    } catch (e) { if (e?.name !== 'RenderingCancelledException') console.warn(e); }
-  }), { root: box, rootMargin: '200px' });
-  for (let i = 1; i <= doc.pages; i++) {
-    const b = document.createElement('div'); b.className = 'thumb'; b.dataset.page = i; b.tabIndex = 0; b.setAttribute('role', 'button');
-    b.innerHTML = `<div class="tl"></div>`;
-    b.onclick = e => { if (e.target.closest('input')) return; if (e.target.closest('.tren')) return renamePage(docId, i, b.querySelector('.tl')); showPage(docId, i); };
-    b.ondblclick = e => { if (!e.target.closest('canvas, input, .tren')) { e.preventDefault(); renamePage(docId, i, b.querySelector('.tl')); } };
-    b.onkeydown = e => { if (e.target !== b) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showPage(docId, i); } if (e.key === 'F2') { e.preventDefault(); renamePage(docId, i, b.querySelector('.tl')); } };
-    box.appendChild(b); thumbObs.observe(b);
+  const P = S.project; if (!P) return;
+  if (thumbProj !== P.id) { thumbDrop(); thumbProj = P.id; }
+  thumbObs = new IntersectionObserver(ents => ents.forEach(en => { if (!en.isIntersecting) return; thumbObs.unobserve(en.target); thumbRender(en.target); }), { root: box, rootMargin: '400px' });
+  let i = 0;
+  for (const doc of P.docs) {
+    const h = document.createElement('div'); h.className = 'dhd'; h.dataset.doc = doc.id;
+    h.innerHTML = `<span class="dnm" title="${esc(doc.name)}">${esc(doc.name)}</span><span class="dct">${doc.pages} page${doc.pages > 1 ? 's' : ''}</span><button class="dbt dren" title="Rename this document" aria-label="Rename ${esc(doc.name)}">✎</button><button class="dbt drm" title="Remove this document from the project" aria-label="Remove ${esc(doc.name)}">✕</button>`;
+    h.querySelector('.dren').onclick = () => inlineRename(h.querySelector('.dnm'), doc.name, 'Document name', v => { v = String(v).replace(/\s+/g, ' ').trim().slice(0, 120); if (v) { doc.name = v; touch(); refreshDocSelect(); toast('Document renamed'); } renderThumbs(); });
+    h.querySelector('.drm').onclick = () => removeDoc(doc.id);
+    box.appendChild(h);
+    for (let p = 1; p <= doc.pages; p++) {
+      const b = document.createElement('div'); b.className = 'thumb'; b.dataset.doc = doc.id; b.dataset.page = p; b.dataset.i = i++; b.tabIndex = 0; b.setAttribute('role', 'button');
+      b.innerHTML = `<div class="tim"></div><div class="tl"></div>`;
+      const ren = () => renamePage(doc.id, p, b.querySelector('.tl'));
+      b.onclick = e => { if (e.target.closest('input')) return; if (e.target.closest('.tren')) return ren(); if (doc.id !== S.docId || p !== S.pageNum) showPage(doc.id, p); phoneSideDone(); };
+      b.ondblclick = e => { if (!e.target.closest('input, .tren')) { e.preventDefault(); ren(); } };
+      b.onkeydown = e => { if (e.target !== b) return; if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showPage(doc.id, p); } if (e.key === 'F2') { e.preventDefault(); ren(); } };
+      box.appendChild(b);
+      const im = thumbImg.get(doc.id + ':' + p); if (im) paintThumb(b, im); else { if (doc.blank?.w && doc.blank?.h) b.querySelector('.tim').style.aspectRatio = `${doc.blank.w} / ${doc.blank.h}`; thumbObs.observe(b); }
+    }
   }
   markThumb();
 }
 function markThumb() {
-  const counts = {}; for (const m of S.project?.markups || []) if (m.docId === S.docId) counts[m.page] = (counts[m.page] || 0) + 1;
+  const counts = {}; for (const m of S.project?.markups || []) { const k = m.docId + ':' + m.page; counts[k] = (counts[k] || 0) + 1; }
+  $$('#thumbs .dhd').forEach(h => h.classList.toggle('on', h.dataset.doc === S.docId));
   $$('#thumbs .thumb').forEach(b => {
-    const p = +b.dataset.page, on = p === S.pageNum; b.classList.toggle('on', on);
+    const d = b.dataset.doc, p = +b.dataset.page, k = d + ':' + p, on = d === S.docId && p === S.pageNum, was = b.classList.contains('on'); b.classList.toggle('on', on);
+    if (b.dataset.r && +b.dataset.n !== (counts[k] || 0)) thumbDirty(k);
     const tl = b.querySelector('.tl'); if (tl.querySelector('input')) return;
-    const h = `<span class="pgnm" title="Double-click to rename">${esc(pageLabelOf(S.docId, p))}</span><span class="tren" role="button" tabindex="0" title="Rename this page" aria-label="Rename page ${p}">✎</span><br><span class="pgmeta">${pageName(S.docId, p) ? `p.${p}` : ''}${counts[p] ? ` · <b>${counts[p]}</b>` : ''}${S.project?.scales[pageKey(S.docId, p)] ? '' : ' · <span title="No scale">no scale</span>'}</span>`;
+    const h = `<span class="pgnm" title="Double-click to rename">${esc(pageLabelOf(d, p))}</span><span class="tren" role="button" tabindex="0" title="Rename this page" aria-label="Rename page ${p}">✎</span><br><span class="pgmeta">${pageName(d, p) ? `p.${p}` : ''}${counts[k] ? ` · <b title="Markups on this page">${counts[k]}</b>` : ''}${S.project?.scales[k] ? '' : ' · <span title="No scale">no scale</span>'}</span>`;
     if (tl.dataset.h !== h) { tl.innerHTML = h; tl.dataset.h = h; const pm = tl.querySelector('.pgmeta'); if (pm) pm.innerHTML = pm.innerHTML.replace(/^ · /, ''); }
-    if (on && !b.dataset.seen) { b.scrollIntoView({ block: 'nearest' }); }
+    if (on && !was) b.scrollIntoView({ block: 'nearest' });
   });
 }
 
@@ -1729,7 +1775,7 @@ function switchView(v) {
   if (v === 'estimate') renderEstimate(); if (v === 'products') renderProducts(); if (v === 'checklist') renderChecklist();
   if (v === 'plans' && S.page) { scheduleDetail(); }
 }
-function refreshAll() { setProjName(S.project?.name); if (!!S.project !== hadProj) { hadProj = !!S.project; mountEmptyBlank(); } refreshActiveProduct(); refreshPanel(); updateScaleLabel(); renderOverlay(); if (S.view !== 'plans') switchView(S.view); }
+function refreshAll() { setProjName(S.project?.name); thumbDirty(); if (!!S.project !== hadProj) { hadProj = !!S.project; mountEmptyBlank(); } refreshActiveProduct(); refreshPanel(); updateScaleLabel(); renderOverlay(); if (S.view !== 'plans') switchView(S.view); }
 $$('#tabs button').forEach(b => b.onclick = () => switchView(b.dataset.view));
 $$('.tool').forEach(b => b.onclick = () => setTool(b.dataset.tool));
 $('#btnProjects').onclick = projectsModal;

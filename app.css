@@ -42,7 +42,7 @@ main{position:absolute;top:50px;left:0;right:0;bottom:0}
 .scalebtn.warn{border-color:#8a6d3b;color:#e8c98b}
 #zoomFit{min-width:62px}
 #plansBody{flex:1;display:flex;min-height:0}
-#sidebar{width:168px;flex:none;background:var(--panel);display:flex;flex-direction:column;min-height:0}
+#sidebar{width:200px;flex:none;background:var(--panel);display:flex;flex-direction:column;min-height:0}
 .sideHead{display:flex;gap:4px;padding:6px}
 .sideHead select{flex:1;min-width:0;font-size:12.5px}
 #thumbs{flex:1;overflow:auto;padding:4px 10px}
@@ -130,7 +130,7 @@ table.grid tr.cat td{background:#1f252b;color:var(--accent2);font-weight:600;fon
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(30px);background:#11161a;border:1px solid var(--accent);border-radius:9px;padding:8px 14px;opacity:0;transition:.25s;pointer-events:none;z-index:60}
 #toast.on{opacity:1;transform:translateX(-50%)}
 #printArea{display:none}
-@media (max-width:1100px){ .tool span{display:none} #panel{width:250px} #sidebar{width:140px} }
+@media (max-width:1100px){ .tool span{display:none} #panel{width:250px} #sidebar{width:170px} }
 /* ---- v1.4 ---- */
 #plansBody>#sidebar{order:0}#plansBody>#splitSide{order:1}#plansBody>#viewerCol{order:2}#plansBody>#splitPanel{order:3}#plansBody>#panel{order:4}
 #plansBody.swapped>#panel{order:0}#plansBody.swapped>#splitPanel{order:1}#plansBody.swapped>#splitSide{order:3}#plansBody.swapped>#sidebar{order:4}
@@ -421,3 +421,19 @@ input.bad{border-color:#d9534f!important}
 @media (max-width:560px){#top .brand{font-size:0}#top .brand .logo{font-size:18px}#top .brand .ver{display:none}.projbtn{flex:0 0 auto;min-width:76px;max-width:44vw;padding:4px 7px}.projbtn #projName{min-width:0;flex:1 1 auto}}
 @media (max-width:560px){#tabs{min-width:0;flex:1 1 auto;overflow-x:auto;scrollbar-width:none}#tabs::-webkit-scrollbar{display:none}#tabs>*{flex:none}}
 @media print{:root,html[data-theme]{color-scheme:light!important}html,body{background:#fff!important;color:#000}}
+
+/* v1.8.4: one continuous page list, grouped by document, thumbnails show their markups */
+#docTools[hidden],#docSelect[hidden]{display:none}
+.sideHead{align-items:center}.sideHead .addLbl{flex:1;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;padding-left:2px}
+#thumbs{padding:0 8px 12px}
+.dhd{display:flex;align-items:center;gap:4px;margin:8px -8px 2px;padding:5px 8px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel);z-index:2}
+.dhd .dnm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-weight:600}
+.dhd.on .dnm{color:var(--accent2)}.dhd .dct{flex:none;font-size:11px}
+.dhd .dbt{flex:none;padding:1px 6px;font-size:12px;min-height:0;background:transparent;border:1px solid transparent;opacity:.7}
+.dhd .dbt:hover,.dhd .dbt:focus-visible{opacity:1;border-color:var(--line2)}.dhd .drm:hover{color:#e5534b}
+.dhd .pgin{flex:1;font-size:12px;padding:2px 4px}
+.thumb{margin:6px 0 8px;padding:4px}
+.thumb .tim{position:relative;width:100%;aspect-ratio:17/11;background:#fff;border-radius:3px;overflow:hidden}
+.thumb .tim img,.thumb .tim svg{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none}
+.thumb .tim svg text{pointer-events:none}
+@media (max-width:560px){#sidebar:not(.min){width:min(52vw,200px)!important}}
